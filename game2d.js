@@ -1,40 +1,55 @@
 /* ============================================================
-   КОЛОНИСТ — 2D-игра: собирай ресурсы и строй базу
-   Персонаж нарисован на canvas с процедурной скелетной
-   анимацией (ходьба, прыжок, замах инструментом).
+   ПЕРВОБЫТНЫЙ ВЫЖИВАЧ — top-down 2D
+   Человек-автоном: сам добывает ресурсы, строит и улучшает дом,
+   ночью отбивается от волн зомби. Игрок задаёт приоритеты.
    ============================================================ */
 "use strict";
 
-/* ---------------- КОНСТАНТЫ ---------------- */
-const W_WORLD = 6400;          // ширина мира, px
-const GROUND = 640;            // базовый уровень земли
-const GRID = 32;               // сетка строительства
-const GRAV = 1700;
-const JUMP_V = -640;
-const ACC = 1900;
-const MAX_V = 270;
-const REACH = 105;             // дистанция до дерева/камня
-const PLACE_DIST = 330;        // дистанция строительства
-const DAY_LEN = 160;           // длительность суток, сек
-const SAVE_KEY = "colonist2d_v1";
+/* ---------------- МИР / БАЛАНС ---------------- */
+const W = 2600, H = 1900;            // размер мира
+const BASE = { x: W / 2, y: H / 2 }; // дом в центре
+const DAY_LEN = 130;                 // длительность суток, с
+const NIGHT_AT = 0.62;               // доля суток, когда начинается ночь
+const HOME_R = 92;                   // «дворовая» зона дома
 
-const SOLID = { platform: true, wall: true, stone: true, fire: false };
+const human = {
+  x: BASE.x + 120, y: BASE.y + 40,
+  dir: 0, ph: 0, speed: 132,
+  hp: 100, maxHp: 100,
+  atkCd: 0, attackT: 1,           // attackT: 1 = не бьёт
+  eatT: 0, buildT: 0, buildKind: null,
+  carry: { wood: 0, stone: 0, food: 0 },
+  kills: 0,
+  task: null,                     // {type:'gather',node} | {type:'home'} | {type:'guard'}
+  moveGoal: null,                 // {x,y,ttl}
+  look: null,                     // внешность (генерируется)
+};
 
-const SLOTS = [
-  { id: "tool",     icon: "🪓", name: "Инструм.", wood: 0, stone: 0 },
-  { id: "platform", icon: "▭",  name: "Платформа", wood: 5, stone: 0 },
-  { id: "wall",     icon: "🧱", name: "Стена",     wood: 4, stone: 0 },
-  { id: "stone",    icon: "🪨", name: "Блок",      wood: 0, stone: 6 },
-  { id: "fire",     icon: "🔥", name: "Костёр",    wood: 12, stone: 6 },
-];
+const lv = { house: 1, weapon: 1, bag: 1 };
+let prio = "house";               // что улучшать следующим
+const inv = { wood: 0, stone: 0, food: 0 };
+
+const house = { hp: 120, maxHp: 120 };
+const HOUSE_HP = l => 120 + 90 * (l - 1);
+const HOUSE_NAMES = ["Костёр и шалаш", "Хижина", "Дом с частоколом", "Дом с каменной оградой", "Цитадель"];
+const WEAPON_NAMES = ["Дубина", "Каменный топор", "Копьё", "Булава", "Великий топор"];
+const houseCost = l => ({ wood: 12 + l * 10, stone: l >= 2 ? 8 * l : 0 });
+const weaponCost = l => ({ wood: 8 + l * 6, stone: 4 + l * 6 });
+const bagCost = l => ({ wood: 10 + l * 5, stone: 4 + l * 3 });
+const weaponDmg = () => 12 + (lv.weapon - 1) * 9;
+const bagCap = () => 10 + (lv.bag - 1) * 6;
+const carryTotal = () => human.carry.wood + human.carry.stone + human.carry.food;
+
+const MAX_LV = 5;
 
 /* ---------------- ХОЛСТ ---------------- */
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 let VW = 0, VH = 0, DPR = 1;
-const dk = document.createElement("canvas");       // слой темноты
+const dk = document.createElement("canvas");
 const dkx = dk.getContext("2d");
-
+const mini = document.getElementById("mini");
+const mx = mini.getContext("2d");
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   VW = window.innerWidth; VH = window.innerHeight;
@@ -49,882 +64,1086 @@ resize();
 /* ---------------- УТИЛИТЫ ---------------- */
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const lerp = (a, b, k) => a + (b - a) * k;
-const smooth = (t) => t * t * (3 - 2 * t);
-function lerpHex(h1, h2, k) {
-  const a = parseInt(h1.slice(1), 16), b = parseInt(h2.slice(1), 16);
-  const r = Math.round(lerp(a >> 16, b >> 16, k));
-  const g = Math.round(lerp((a >> 8) & 255, (b >> 8) & 255, k));
-  const bl = Math.round(lerp(a & 255, b & 255, k));
-  return `rgb(${r},${g},${bl})`;
-}
-// детерминированный шум по целому
+const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+const smooth = t => t * t * (3 - 2 * t);
 function hash(n) { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
-
-/* ---------------- МИР ---------------- */
-function heightAt(x) {
-  return GROUND
-    - 46 * Math.sin(x * 0.0016 + 1.7)
-    - 24 * Math.sin(x * 0.0043 + 0.6)
-    - 12 * Math.sin(x * 0.009 + 3.1);
+function angleDiff(a, b) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
 
-const nodes = [];   // деревья и камни
-let nid = 0;
-function addNode(type, x) {
-  const n = {
-    id: nid++, type, x, baseY: heightAt(x),
-    hp: type === "tree" ? 3 : 4, maxHp: type === "tree" ? 3 : 4,
-    seed: hash(x), scale: 0.8 + hash(x * 3) * 0.5,
-    shake: 0, dead: false, fall: 0, respawn: 0, grow: 10,
-  };
-  nodes.push(n);
-  return n;
-}
-function genWorld() {
-  // гарантированные ресурсы у спавна
-  addNode("tree", 260); addNode("tree", 470); addNode("rock", 610); addNode("tree", 760);
-  for (let x = 1000; x < W_WORLD - 300; x += 320 + hash(x) * 380) {
-    addNode(hash(x * 7) < 0.62 ? "tree" : "rock", x);
-  }
-}
-
-const blocks = [];              // постройки {gx,gy,t}
-const occ = new Map();          // "gx,gy" -> block
-const cellKey = (gx, gy) => gx + "," + gy;
-
-/* ---------------- СОСТОЯНИЕ ---------------- */
-const c = { x: 400, y: 0, vx: 0, vy: 0, face: 1, onGround: true, ph: 0, action: null };
-c.y = heightAt(c.x);
-const inv = { wood: 0, stone: 0 };
-let sel = 0;
-let camX = 0, camY = 0;
-let dayT = 0.12, dayN = 1;
-let elapsed = 0;
-const mouse = { x: 0, y: 0, down: false };
-const keys = {};
-let swingCd = 0;
-let errCd = 0;
-const ms = { wood: false, stone: false, fire: false, v10: false, night: false };
-let saveCd = 0;
-
-/* ---------------- ЗВУК (WebAudio) ---------------- */
+/* ---------------- ЗВУК ---------------- */
 let AC = null, master = null, muted = false, noiseBuf = null;
 function initAudio() {
   if (AC) return;
   try {
     AC = new (window.AudioContext || window.webkitAudioContext)();
-    master = AC.createGain();
-    master.gain.value = muted ? 0 : 0.5;
+    master = AC.createGain(); master.gain.value = muted ? 0 : 0.5;
     master.connect(AC.destination);
-    noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.2, AC.sampleRate);
+    noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.25, AC.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
   } catch (e) { /* без звука */ }
 }
-function tone(freq, freq2, dur, type, vol) {
-  if (!AC) return;
+window.addEventListener("pointerdown", initAudio);
+window.addEventListener("keydown", initAudio);
+function tone(f1, f2, dur, type, vol, delay = 0) {
+  if (!AC || muted) return;
+  const t0 = AC.currentTime + delay;
   const o = AC.createOscillator(), g = AC.createGain();
-  o.type = type; o.frequency.setValueAtTime(freq, AC.currentTime);
-  o.frequency.exponentialRampToValueAtTime(Math.max(freq2, 1), AC.currentTime + dur);
-  g.gain.setValueAtTime(vol, AC.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + dur);
+  o.type = type; o.frequency.setValueAtTime(f1, t0);
+  o.frequency.exponentialRampToValueAtTime(Math.max(f2, 1), t0 + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
   o.connect(g); g.connect(master);
-  o.start(); o.stop(AC.currentTime + dur + 0.02);
+  o.start(t0); o.stop(t0 + dur + 0.02);
 }
-function noise(dur, freq, vol) {
-  if (!AC) return;
+function noiseSfx(dur, freq, vol, delay = 0) {
+  if (!AC || muted) return;
+  const t0 = AC.currentTime + delay;
   const s = AC.createBufferSource(); s.buffer = noiseBuf;
   const f = AC.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = freq;
   const g = AC.createGain();
-  g.gain.setValueAtTime(vol, AC.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
   s.connect(f); f.connect(g); g.connect(master);
-  s.start(); s.stop(AC.currentTime + dur + 0.02);
+  s.start(t0); s.stop(t0 + dur + 0.03);
 }
-function sfx(name) {
-  if (!AC || muted) return;
-  if (name === "chop") { noise(0.09, 700, 0.5); tone(130, 70, 0.09, "triangle", 0.35); }
-  else if (name === "mine") { tone(880, 240, 0.07, "square", 0.16); noise(0.06, 2400, 0.3); }
-  else if (name === "place") { tone(330, 180, 0.08, "triangle", 0.4); noise(0.05, 500, 0.25); }
-  else if (name === "error") { tone(170, 120, 0.13, "sawtooth", 0.2); }
-  else if (name === "win") { tone(523, 523, 0.12, "triangle", 0.3); setTimeout(() => tone(659, 659, 0.12, "triangle", 0.3), 90); setTimeout(() => tone(784, 784, 0.18, "triangle", 0.3), 180); }
+const sfx = {
+  chop() { noiseSfx(0.09, 700, 0.5); tone(120, 70, 0.09, "triangle", 0.3); },
+  mine() { tone(900, 250, 0.06, "square", 0.13); noiseSfx(0.05, 2600, 0.28); },
+  pick() { tone(500, 700, 0.07, "sine", 0.25); },
+  hit() { noiseSfx(0.07, 900, 0.42); tone(160, 80, 0.08, "triangle", 0.35); },
+  zdie() { tone(220, 55, 0.35, "sawtooth", 0.28); },
+  growl() { tone(90, 60, 0.5, "sawtooth", 0.22); },
+  place() { tone(330, 190, 0.07, "triangle", 0.32); noiseSfx(0.05, 500, 0.2); },
+  hammer() { noiseSfx(0.05, 1200, 0.3); tone(220, 160, 0.06, "square", 0.18); },
+  upgrade() { [440, 554, 659, 880].forEach((f, i) => tone(f, f, 0.14, "triangle", 0.26, i * 0.09)); },
+  eat() { tone(300, 420, 0.08, "sine", 0.22); tone(280, 380, 0.08, "sine", 0.2, 0.1); },
+  hurt() { tone(200, 90, 0.16, "sawtooth", 0.3); },
+  horn() { tone(180, 140, 0.7, "sawtooth", 0.3); tone(120, 95, 0.9, "sawtooth", 0.24, 0.12); },
+  dawn() { [523, 659, 784].forEach((f, i) => tone(f, f, 0.18, "sine", 0.22, i * 0.12)); },
+  lose() { [330, 262, 208, 156].forEach((f, i) => tone(f, f * 0.94, 0.3, "sawtooth", 0.26, i * 0.22)); },
+};
+
+/* ---------------- МИР: РЕСУРСЫ ---------------- */
+const nodes = [];
+let nid = 0;
+function addNode(type, x, y) {
+  nodes.push({
+    id: nid++, type, x, y,
+    hp: type === "tree" ? 3 : type === "rock" ? 4 : 1,
+    maxHp: type === "tree" ? 3 : type === "rock" ? 4 : 1,
+    seed: hash(x * 0.37 + y * 0.11), scale: 0.85 + hash(x + y * 2.7) * 0.4,
+    shake: 0, dead: false, respawn: 0, grow: 10, flash: 0,
+  });
 }
-window.addEventListener("pointerdown", initAudio, { once: false });
-window.addEventListener("keydown", initAudio, { once: false });
+function genWorld() {
+  const tryAdd = (type, minBase) => {
+    for (let t = 0; t < 24; t++) {
+      const x = 90 + hash(type.length * 7 + t * 13.3 + nid) * (W - 180);
+      const y = 90 + hash(type.length * 3 + t * 7.7 + nid * 1.7) * (H - 180);
+      const db = dist(x, y, BASE.x, BASE.y);
+      if (db < minBase || db > 700 && nodes.length < 8) continue;
+      let ok = true;
+      for (const n of nodes) if (dist(x, y, n.x, n.y) < 78) { ok = false; break; }
+      if (ok) { addNode(type, x, y); return; }
+    }
+  };
+  // стартовые рядом с базой
+  addNode("tree", BASE.x - 210, BASE.y - 60);
+  addNode("tree", BASE.x + 190, BASE.y - 140);
+  addNode("tree", BASE.x - 90, BASE.y + 230);
+  addNode("rock", BASE.x + 240, BASE.y + 170);
+  addNode("rock", BASE.x - 280, BASE.y + 120);
+  addNode("bush", BASE.x + 120, BASE.y - 260);
+  for (let i = 0; i < 46; i++) tryAdd("tree", 170);
+  for (let i = 0; i < 26; i++) tryAdd("rock", 190);
+  for (let i = 0; i < 15; i++) tryAdd("bush", 150);
+}
+
+/* ---------------- СУЩНОСТИ ---------------- */
+const zombies = [];
+const parts = [];
+const texts = [];
+const stains = [];
+const corpses = [];
+
+function spawnParts(x, y, n, color, opt = {}) {
+  for (let i = 0; i < n; i++) {
+    const a = opt.dir !== undefined ? opt.dir + (Math.random() - 0.5) * (opt.spread || 1.6) : Math.random() * Math.PI * 2;
+    const sp = (opt.sp || 110) * (0.4 + Math.random() * 0.9);
+    parts.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      g: opt.g !== undefined ? opt.g : 0,
+      life: 1, decay: opt.decay || 1.7,
+      size: 2 + Math.random() * 3, color,
+    });
+  }
+}
+function floatText(x, y, txt, color, big) {
+  texts.push({ x, y, txt, color, life: 1, big: !!big });
+}
+
+/* ---------------- ЧАСТИЦЫ ОБНОВЛЕНИЕ ---------------- */
+function updateFx(dt) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.vy += p.g * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 1 - 1.5 * dt; p.vy *= 1 - 1.5 * dt;
+    p.life -= p.decay * dt;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const f = texts[i];
+    f.y -= 30 * dt; f.life -= 0.85 * dt;
+    if (f.life <= 0) texts.splice(i, 1);
+  }
+  for (let i = stains.length - 1; i >= 0; i--) {
+    stains[i].life -= dt / 10;
+    if (stains[i].life <= 0) stains.splice(i, 1);
+  }
+  for (let i = corpses.length - 1; i >= 0; i--) {
+    const c = corpses[i];
+    c.life -= dt / 6;
+    if (c.life <= 0) { stains.push({ x: c.x, y: c.y, r: 15, color: "rgba(40,60,30,0.35)", life: 1 }); corpses.splice(i, 1); }
+  }
+}
+
+/* ---------------- РЕСУРСНЫЕ ДЕЙСТВИЯ ---------------- */
+function yieldOf(type) {
+  if (type === "tree") return { wood: 3 };
+  if (type === "rock") return { stone: 3 };
+  return { food: 2 };
+}
+function giveYield(type) {
+  const y = yieldOf(type);
+  for (const k in y) {
+    const space = bagCap() - carryTotal();
+    const amt = Math.min(y[k], Math.max(space, 0));
+    human.carry[k] += amt;
+    if (amt < y[k]) floatText(human.x, human.y - 30, "Сумка полна!", "#ffb56b");
+  }
+  const col = type === "tree" ? "#e8c68a" : type === "rock" ? "#d7deeb" : "#ff9e9e";
+  const ic = type === "tree" ? "🪵" : type === "rock" ? "🪨" : "🍒";
+  floatText(human.x, human.y - 34, "+" + Object.values(yieldOf(type))[0] + " " + ic, col);
+}
+function nodeRespawnTime(type) { return type === "tree" ? 42 : type === "rock" ? 60 : 30; }
+
+function applyNodeHit(n) {
+  n.hp--; n.shake = 1; n.flash = 1;
+  giveYield(n.type);
+  if (n.type === "tree") {
+    spawnParts(n.x, n.y - 6, 7, "#a3703f", { sp: 130 });
+    sfx.chop();
+  } else if (n.type === "rock") {
+    spawnParts(n.x, n.y, 7, "#9aa3b2", { sp: 140 });
+    sfx.mine();
+  } else {
+    spawnParts(n.x, n.y - 6, 6, "#e0524d", { sp: 90 });
+    sfx.pick();
+  }
+  if (n.hp <= 0) {
+    n.dead = true; n.respawn = 0;
+    if (n.type === "tree") spawnParts(n.x, n.y - 4, 14, "#7a4f2a", { sp: 150 });
+    if (n.type === "rock") spawnParts(n.x, n.y, 16, "#8b93a3", { sp: 170 });
+  }
+}
+
+/* ---------------- ДОМ / УЛУЧШЕНИЯ ---------------- */
+function canAfford(c) { return inv.wood >= c.wood && inv.stone >= c.stone; }
+function payCost(c) { inv.wood -= c.wood; inv.stone -= c.stone; refreshHUD(); }
+function nextUpgrade() {
+  const order = [prio, ...["house", "weapon", "bag"].filter(k => k !== prio)];
+  for (const k of order) {
+    if (lv[k] >= MAX_LV) continue;
+    const cost = k === "house" ? houseCost(lv.house) : k === "weapon" ? weaponCost(lv.weapon) : bagCost(lv.bag);
+    if (canAfford(cost)) return { kind: k, cost };
+  }
+  return null;
+}
+function applyUpgrade(kind) {
+  lv[kind]++;
+  if (kind === "house") { house.maxHp = HOUSE_HP(lv.house); house.hp = house.maxHp; }
+  sfx.upgrade();
+  const nm = kind === "house" ? HOUSE_NAMES[lv.house - 1] : kind === "weapon" ? WEAPON_NAMES[lv.weapon - 1] : "Большая сумка";
+  floatText(BASE.x, BASE.y - 90, "⬆ " + nm, "#ffd76e", true);
+  toast("⬆ Улучшение: " + nm + " (ур. " + lv[kind] + ")");
+  spawnParts(BASE.x, BASE.y, 22, "#ffd76e", { sp: 170 });
+  refreshHUD();
+}
+
+/* ---------------- ЗОМБИ ---------------- */
+let wave = 0;          // номер прошедшей/текущей волны
+let toSpawn = 0, spawnCd = 0;
+let growlCd = 3;
+const waveCount = n => 2 + n * 2;
+const waveHp = n => 24 + n * 9;
+const waveSpd = n => Math.min(42 + n * 2.4, 96);
+const waveDmg = n => 5 + n;
+
+function spawnZombie() {
+  const a = Math.random() * Math.PI * 2;
+  const r = Math.hypot(W, H) / 2 + 60;
+  const g1 = 0.35 + Math.random() * 0.25;
+  zombies.push({
+    x: clamp(BASE.x + Math.cos(a) * r, -40, W + 40),
+    y: clamp(BASE.y + Math.sin(a) * r, -40, H + 40),
+    dir: 0, ph: Math.random() * 7,
+    hp: waveHp(wave), maxHp: waveHp(wave),
+    spd: waveSpd(wave) * (0.9 + Math.random() * 0.25),
+    dmg: waveDmg(wave),
+    atkCd: 0, flash: 0, lurch: Math.random() * 7,
+    skin: `hsl(${95 + Math.random() * 30}, 35%, ${28 + Math.random() * 12}%)`,
+    g1, g2: `hsl(${95 + Math.random() * 30}, 30%, ${20 + Math.random() * 10}%)`,
+  });
+}
+
+function zombieHitHuman(z) {
+  const dmg = z.dmg;
+  human.hp -= dmg;
+  human.atkCd = Math.max(human.atkCd, 0.18);
+  sfx.hurt();
+  hurtFlash = 1;
+  spawnParts(human.x, human.y, 8, "#c0392b", { sp: 130 });
+  floatText(human.x, human.y - 36, "-" + dmg, "#ff7b6e");
+  if (human.hp <= 0) gameOver("Человек пал в бою…");
+}
+function zombieHitHouse(z) {
+  house.hp -= z.dmg;
+  sfx.hit();
+  houseShake = 1;
+  spawnParts(z.x, z.y, 6, "#a3703f", { sp: 100 });
+  if (house.hp <= 0) { house.hp = 0; gameOver("Дом разрушен — база пала…"); }
+}
+
+/* ---------------- БОЙ ЧЕЛОВЕКА ---------------- */
+function humanAttack() {
+  human.attackT = 0;
+  human.atkCd = 0.55;
+  human.attackResolved = false;
+  human.swingActive = true;
+}
+function resolveAttack() {
+  const range = lv.weapon >= 3 ? 56 : 48;
+  const arc = 1.25;
+  let hitAny = false;
+  for (const z of zombies) {
+    const d = dist(human.x, human.y, z.x, z.y);
+    if (d > range + 12) continue;
+    const a = Math.atan2(z.y - human.y, z.x - human.x);
+    if (Math.abs(angleDiff(human.dir, a)) > arc) continue;
+    const dmg = weaponDmg();
+    z.hp -= dmg; z.flash = 1;
+    // отброс
+    z.x += Math.cos(a) * 14; z.y += Math.sin(a) * 14;
+    spawnParts(z.x, z.y, 7, "#5d8a3a", { dir: a, spread: 1, sp: 150 });
+    floatText(z.x, z.y - 24, "-" + dmg, "#ffe08a");
+    sfx.hit();
+    hitAny = true;
+    if (z.hp <= 0) killZombie(z);
+  }
+  // дереву/кусту под ударом тоже достаётся (добыча тем же замахом)
+  if (!hitAny && human.task && human.task.type === "gather" && !human.task.node.dead) {
+    const n = human.task.node;
+    const d = dist(human.x, human.y, n.x, n.y);
+    if (d < 64) {
+      const a = Math.atan2(n.y - human.y, n.x - human.x);
+      if (Math.abs(angleDiff(human.dir, a)) < 1.15) applyNodeHit(n);
+    }
+  }
+  return hitAny;
+}
+function killZombie(z) {
+  z.dead = true;
+  human.kills++;
+  human.maxHp = Math.min(100 + human.kills * 2, 170);
+  corpses.push({ x: z.x, y: z.y, dir: z.dir, life: 1, skin: z.skin });
+  spawnParts(z.x, z.y, 14, "#4e7a3a", { sp: 160 });
+  spawnParts(z.x, z.y, 8, "#7a1f1f", { sp: 130 });
+  sfx.zdie();
+}
+
+/* ---------------- ИИ ЧЕЛОВЕКА ---------------- */
+function nearestZombie(x, y, r) {
+  let best = null, bd = r;
+  for (const z of zombies) {
+    if (z.dead) continue;
+    const d = dist(x, y, z.x, z.y);
+    if (d < bd) { bd = d; best = z; }
+  }
+  return best;
+}
+function nearestNode(type, x, y) {
+  let best = null, bd = 1e9;
+  for (const n of nodes) {
+    if (n.dead || n.type !== type) continue;
+    const d = dist(x, y, n.x, n.y);
+    if (d < bd) { bd = d; best = n; }
+  }
+  return best;
+}
+function needType() {
+  // какой ресурс нужнее для выбранного улучшения (или дефицит дома)
+  const ups = [prio, ...["house", "weapon", "bag"].filter(k => k !== prio)];
+  for (const k of ups) {
+    if (lv[k] >= MAX_LV) continue;
+    const c = k === "house" ? houseCost(lv.house) : k === "weapon" ? weaponCost(lv.weapon) : bagCost(lv.bag);
+    if (inv.wood < c.wood) return "wood";
+    if (inv.stone < c.stone) return "stone";
+  }
+  if (human.hp < 80 && inv.food < 3) return "food";
+  return Math.random() < 0.6 ? "wood" : "stone";
+}
+function moveToward(tx, ty, dt, spdMul = 1) {
+  const d = dist(human.x, human.y, tx, ty);
+  if (d < 3) return true;
+  const sp = human.speed * spdMul;
+  const nx = human.x + (tx - human.x) / d * sp * dt;
+  const ny = human.y + (ty - human.y) / d * sp * dt;
+  human.x = clamp(nx, 26, W - 26); human.y = clamp(ny, 26, H - 26);
+  const ta = Math.atan2(ty - human.y, tx - human.x);
+  human.dir += angleDiff(human.dir, ta) * Math.min(1, 10 * dt);
+  human.ph += sp * dt * 0.075;
+  return false;
+}
+function faceToward(tx, ty, dt) {
+  const ta = Math.atan2(ty - human.y, tx - human.x);
+  human.dir += angleDiff(human.dir, ta) * Math.min(1, 12 * dt);
+}
+
+function updateHuman(dt, isNight, nf) {
+  human.atkCd -= dt;
+  human.attackT = Math.min(human.attackT + dt / 0.38, 1);
+  if (human.attackT >= 1) human.swingActive = false;
+  if (human.eatT > 0) human.eatT -= dt;
+
+  // удар в середине замаха (и в бою, и при добыче)
+  if (human.swingActive && !human.attackResolved && human.attackT >= 0.42) {
+    human.attackResolved = true;
+    resolveAttack();
+  }
+
+  const zNear = nearestZombie(human.x, human.y, isNight ? 190 : 150);
+  human.combat = false;
+
+  // ---- бой всегда в приоритете ----
+  if (zNear) {
+    human.combat = true;
+    human.task = null;
+    const d = dist(human.x, human.y, zNear.x, zNear.y);
+    const range = lv.weapon >= 3 ? 50 : 42;
+    if (d > range) moveToward(zNear.x, zNear.y, dt);
+    else {
+      faceToward(zNear.x, zNear.y, dt);
+      if (human.atkCd <= 0 && human.attackT >= 1) { humanAttack(); human.attackResolved = false; }
+    }
+    // не давать себя окружить: лёгкий отход при hp<30%
+    if (human.hp < human.maxHp * 0.3 && isNight) {
+      const a = Math.atan2(human.y - BASE.y, human.x - BASE.x);
+      moveToward(BASE.x + Math.cos(a) * 40, BASE.y + Math.sin(a) * 40, dt, 0.9);
+    }
+    return;
+  }
+
+  // ---- ручной приказ ----
+  if (human.moveGoal) {
+    human.moveGoal.ttl -= dt;
+    const arrived = moveToward(human.moveGoal.x, human.moveGoal.y, dt);
+    if (arrived || human.moveGoal.ttl <= 0) human.moveGoal = null;
+    return;
+  }
+
+  // ---- еда ----
+  if (human.hp < human.maxHp * 0.55 && human.carry.food > 0 && human.eatT <= 0) {
+    human.eatT = 0.7;
+    human.carry.food--;
+    human.hp = Math.min(human.maxHp, human.hp + 30);
+    floatText(human.x, human.y - 36, "+30 ❤️", "#8fe08f");
+    sfx.eat();
+    return;
+  }
+  if (human.hp < human.maxHp * 0.55 && human.carry.food <= 0 && inv.food > 0 &&
+      dist(human.x, human.y, BASE.x, BASE.y) < HOME_R) {
+    inv.food--; human.hp = Math.min(human.maxHp, human.hp + 30);
+    floatText(human.x, human.y - 36, "+30 ❤️", "#8fe08f");
+    sfx.eat();
+    return;
+  }
+
+  // ---- ночь: охрана базы ----
+  if (isNight) {
+    const dHome = dist(human.x, human.y, BASE.x, BASE.y);
+    if (dHome > HOME_R * 0.8) moveToward(BASE.x, BASE.y + 46, dt);
+    return;
+  }
+
+  // ---- день: работа ----
+  const cTotal = carryTotal();
+  const cap = bagCap();
+  const atHome = dist(human.x, human.y, BASE.x, BASE.y) < HOME_R * 0.9;
+
+  // 1) сдать добычу
+  if (cTotal > 0 && (cTotal >= cap || !human.task || human.task.type === "home")) {
+    if (!atHome) { moveToward(BASE.x, BASE.y + 40, dt); return; }
+    // сдать
+    if (cTotal > 0) {
+      inv.wood += human.carry.wood; inv.stone += human.carry.stone; inv.food += human.carry.food;
+      if (cTotal >= cap) floatText(BASE.x, BASE.y - 70, "Добыча сдана", "#c9e8a0");
+      human.carry = { wood: 0, stone: 0, food: 0 };
+      refreshHUD();
+    }
+  }
+
+  // 2) ремонт дома (если повреждён и есть дерево)
+  if (atHome && house.hp < house.maxHp && inv.wood > 0) {
+    human.buildKind = "repair";
+    human.hammerT = (human.hammerT || 0) + dt;
+    human.attackT = clamp(human.hammerT / 0.45, 0, 1) * 0.9;
+    faceToward(BASE.x, BASE.y - 30, dt);
+    if (human.hammerT >= 0.45) {
+      human.hammerT = 0;
+      sfx.hammer();
+      house.hp = Math.min(house.maxHp, house.hp + 10);
+      inv.wood = Math.max(0, inv.wood - 1);
+      spawnParts(BASE.x + (Math.random() - 0.5) * 60, BASE.y + (Math.random() - 0.5) * 40, 4, "#c9a06a", { sp: 80 });
+      refreshHUD();
+    }
+    return;
+  }
+  if (human.buildKind === "repair") human.buildKind = null;
+
+  // 3) строительство/улучшение (у дома, днём)
+  if (atHome && !human.buildKind) {
+    const up = nextUpgrade();
+    if (up) {
+      payCost(up.cost);                       // ресурсы списываем сразу
+      human.buildKind = up.kind;
+      human.buildTotal = 2.2; human.buildT = 0;
+      human.hammerT = 0;
+    }
+  }
+  if (human.buildKind && human.buildKind !== "repair") {
+    human.buildT += dt;
+    human.hammerT = (human.hammerT || 0) + dt;
+    human.attackT = clamp((human.hammerT % 0.45) / 0.45, 0, 1) * 0.9;
+    faceToward(BASE.x, BASE.y - 30, dt);
+    if (human.hammerT >= 0.45) {
+      human.hammerT = 0;
+      sfx.hammer();
+      spawnParts(BASE.x + (Math.random() - 0.5) * 70, BASE.y + (Math.random() - 0.5) * 50, 5, "#c9a06a", { sp: 90 });
+    }
+    if (human.buildT >= human.buildTotal) {
+      applyUpgrade(human.buildKind);
+      human.buildKind = null;
+    }
+    return;
+  }
+
+  // 4) сбор ресурсов
+  const want = needType();
+  if (human.task && (human.task.node.dead || needTypeSafe(human.task) !== want)) human.task = null;
+  if (!human.task) {
+    const tmap = { wood: "tree", stone: "rock", food: "bush" };
+    const n = nearestNode(tmap[want], human.x, human.y) ||
+              nearestNode("tree", human.x, human.y) ||
+              nearestNode("rock", human.x, human.y) ||
+              nearestNode("bush", human.x, human.y);
+    if (n) human.task = { type: "gather", node: n };
+    else { // нечего добывать — вернуться к дому
+      moveToward(BASE.x + 60, BASE.y + 60, dt);
+      return;
+    }
+  }
+  const n = human.task.node;
+  const d = dist(human.x, human.y, n.x, n.y);
+  const reach = 40;
+  if (d > reach) { moveToward(n.x, n.y, dt); return; }
+  faceToward(n.x, n.y, dt);
+  if (human.atkCd <= 0 && human.attackT >= 1) {
+    humanAttack(); human.attackResolved = false; human.atkCd = 0.5;
+  }
+}
+function needTypeSafe(task) {
+  // тип ресурса, который даёт узел задачи
+  return task.node.type === "tree" ? "wood" : task.node.type === "rock" ? "stone" : "food";
+}
+
+/* ---------------- ЗОМБИ ИИ ---------------- */
+function updateZombies(dt, isNight, nf) {
+  // спавн волны
+  if (toSpawn > 0) {
+    spawnCd -= dt;
+    if (spawnCd <= 0) { spawnZombie(); toSpawn--; spawnCd = 0.85; }
+  }
+
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    if (z.dead) { zombies.splice(i, 1); continue; }
+    z.flash *= Math.exp(-8 * dt);
+    z.atkCd -= dt;
+    z.lurch += dt;
+
+    // рассвет выжигает зомби
+    if (!isNight && nf < 0.5) {
+      z.hp -= 34 * dt;
+      if (Math.random() < 0.3) spawnParts(z.x, z.y - 8, 1, "#ff9e5c", { sp: 40, g: -60, decay: 2.2 });
+      if (z.hp <= 0) { killZombie(z); continue; }
+    }
+
+    // выбор цели
+    const dH = dist(z.x, z.y, human.x, human.y);
+    const dB = dist(z.x, z.y, BASE.x, BASE.y);
+    let tx, ty, targetHuman;
+    if (dH < 260 || dH < dB) { tx = human.x; ty = human.y; targetHuman = true; }
+    else { tx = BASE.x; ty = BASE.y; targetHuman = false; }
+
+    const d = dist(z.x, z.y, tx, ty);
+    const reach = targetHuman ? 30 : 44;
+    if (d > reach) {
+      // походка с пошатыванием
+      const wob = Math.sin(z.lurch * 3.1) * 0.35;
+      const a = Math.atan2(ty - z.y, tx - z.x) + wob;
+      const sp = z.spd * (0.75 + 0.25 * Math.abs(Math.sin(z.lurch * 2.4)));
+      z.x += Math.cos(a) * sp * dt;
+      z.y += Math.sin(a) * sp * dt;
+      z.dir += angleDiff(z.dir, a) * Math.min(1, 6 * dt);
+      z.ph += sp * dt * 0.07;
+    } else if (z.atkCd <= 0) {
+      z.atkCd = 0.95;
+      z.attackT = 0;
+      if (targetHuman) zombieHitHuman(z); else zombieHitHouse(z);
+    }
+    z.attackT = Math.min((z.attackT || 1) + dt / 0.3, 1);
+
+    // расталкивание зомби
+    for (let j = i + 1; j < zombies.length; j++) {
+      const o = zombies[j];
+      const dd = dist(z.x, z.y, o.x, o.y);
+      if (dd < 24 && dd > 0.01) {
+        const push = (24 - dd) / 2;
+        const a = Math.atan2(o.y - z.y, o.x - z.x);
+        z.x -= Math.cos(a) * push * dt * 8; z.y -= Math.sin(a) * push * dt * 8;
+        o.x += Math.cos(a) * push * dt * 8; o.y += Math.sin(a) * push * dt * 8;
+      }
+    }
+  }
+
+  // рычание
+  if (zombies.length > 0) {
+    growlCd -= dt;
+    if (growlCd <= 0) { sfx.growl(); growlCd = 2.5 + Math.random() * 4; }
+  }
+}
+
+/* ---------------- ВВОД ---------------- */
+const keys = {};
+let hurtFlash = 0, houseShake = 0;
+let speedMult = 1, paused = false;
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") e.preventDefault();
+  keys[e.code] = true;
+  if (e.repeat) return;
+  if (e.code === "Space") togglePause();
+  if (e.code === "KeyM") toggleMute();
+  if (e.code === "Digit1") setPrio("house");
+  if (e.code === "Digit2") setPrio("weapon");
+  if (e.code === "Digit3") setPrio("bag");
+});
+window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+cv.addEventListener("pointerdown", (e) => {
+  if (gameOverFlag) return;
+  const wx = e.clientX + camX, wy = e.clientY + camY;
+  human.moveGoal = { x: clamp(wx, 30, W - 30), y: clamp(wy, 30, H - 30), ttl: 6 };
+  spawnParts(wx, wy, 6, "#ffe08a", { sp: 60, decay: 2.4 });
+});
 
 /* ---------------- HUD ---------------- */
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 const toastEl = $("toast");
 let toastTimer = null;
-function toast(msg, dur = 3000) {
+function toast(msg, dur = 3400) {
   toastEl.textContent = msg;
   toastEl.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toastEl.classList.remove("show"), dur);
 }
-function refreshHotbar() {
-  const bar = $("hotbar");
-  bar.innerHTML = "";
-  SLOTS.forEach((s, i) => {
-    const d = document.createElement("div");
-    const poor = inv.wood < s.wood || inv.stone < s.stone;
-    d.className = "slot" + (i === sel ? " sel" : "") + (poor && i > 0 ? " poor" : "");
-    const cost = [];
-    if (s.wood) cost.push(`🪵${s.wood}`);
-    if (s.stone) cost.push(`🪨${s.stone}`);
-    d.innerHTML = `<span class="key">${i + 1}</span><span class="ic">${s.icon}</span><span class="nm">${s.name}</span>` +
-      (i > 0 ? `<span class="cost">${cost.join(" ")}</span>` : `<span class="cost">&nbsp;</span>`);
-    d.addEventListener("pointerdown", (e) => { e.stopPropagation(); sel = i; refreshHotbar(); });
-    bar.appendChild(d);
-  });
+function fmtCost(c) {
+  const partsArr = [];
+  if (c.wood) partsArr.push("🪵" + c.wood);
+  if (c.stone) partsArr.push("🪨" + c.stone);
+  return partsArr.join(" ");
 }
-function updateHUD() {
+function refreshHUD() {
   $("inv-wood").textContent = inv.wood;
   $("inv-stone").textContent = inv.stone;
-  $("dayLabel").textContent = "День " + dayN;
-  $("clockIcon").textContent = dayT < 0.07 ? "🌅" : dayT < 0.55 ? "☀️" : dayT < 0.7 ? "🌇" : "🌙";
+  $("inv-food").textContent = inv.food;
+  $("bagTxt").textContent = carryTotal() + " / " + bagCap();
+  $("lv-house").textContent = lv.house;
+  $("lv-weapon").textContent = lv.weapon;
+  $("lv-bag").textContent = lv.bag;
+  const set = (id, c, enabled) => {
+    const el = $(id);
+    el.textContent = enabled ? fmtCost(c) : "МАКС";
+    el.classList.toggle("no", enabled && !canAfford(c));
+  };
+  set("cost-house", houseCost(lv.house), lv.house < MAX_LV);
+  set("cost-weapon", weaponCost(lv.weapon), lv.weapon < MAX_LV);
+  set("cost-bag", bagCost(lv.bag), lv.bag < MAX_LV);
 }
-$("btnReset").addEventListener("click", () => { localStorage.removeItem(SAVE_KEY); location.reload(); });
-$("btnMute").addEventListener("click", toggleMute);
+function setPrio(k) {
+  prio = k;
+  for (const id of ["house", "weapon", "bag"]) $(`prio-${id}`).classList.toggle("sel", id === k);
+  if (human.buildKind && human.buildKind !== "repair") { human.buildKind = null; human.pendingUpgrade = null; }
+}
+for (const id of ["house", "weapon", "bag"]) {
+  $(`prio-${id}`).addEventListener("click", () => setPrio(id));
+}
+$("btnSpeed").addEventListener("click", () => {
+  speedMult = speedMult === 1 ? 2 : speedMult === 2 ? 3 : 1;
+  $("btnSpeed").textContent = "×" + speedMult;
+});
+function togglePause() {
+  paused = !paused;
+  $("btnPause").textContent = paused ? "▶" : "⏸";
+}
+$("btnPause").addEventListener("click", togglePause);
 function toggleMute() {
   muted = !muted;
   if (master) master.gain.value = muted ? 0 : 0.5;
   $("btnMute").textContent = muted ? "🔇" : "🔊";
 }
+$("btnMute").addEventListener("click", toggleMute);
+$("overBtn").addEventListener("click", () => location.reload());
 
-/* ---------------- ЧАСТИЦЫ И ТЕКСТ ---------------- */
-const parts = [];
-function spawnParts(x, y, n, color, opt = {}) {
-  for (let i = 0; i < n; i++) {
-    const a = (opt.up ? -Math.PI / 2 : Math.random() * Math.PI * 2);
-    const sp = (opt.sp || 120) * (0.4 + Math.random() * 0.9);
-    parts.push({
-      x, y,
-      vx: Math.cos(a) * sp + (opt.vx || 0),
-      vy: Math.sin(a) * sp + (opt.vy || 0),
-      g: opt.g !== undefined ? opt.g : 900,
-      life: 1, decay: opt.decay || 1.6,
-      size: 2 + Math.random() * 3, color,
-    });
-  }
-}
-const floaters = [];
-function floatText(x, y, txt, color) {
-  floaters.push({ x, y, txt, color, life: 1 });
-}
-
-/* ---------------- ДЕЙСТВИЯ ПЕРСОНАЖА ---------------- */
-function findTarget() {
-  let best = null, bd = REACH;
-  for (const n of nodes) {
-    if (n.dead) continue;
-    const dx = Math.abs(n.x - c.x);
-    if (dx < bd && Math.abs(n.baseY - c.y) < 170) { bd = dx; best = n; }
-  }
-  return best;
-}
-function startSwing() {
-  const t = findTarget();
-  if (!t) return;
-  c.face = t.x >= c.x ? 1 : -1;
-  c.action = {
-    type: "swing", node: t,
-    tool: t.type === "tree" ? "axe" : "pick",
-    t: 0, dur: 0.5, hit: false,
-  };
-}
-function applyHit(n) {
-  n.shake = 1;
-  n.hp--;
-  if (n.type === "tree") {
-    inv.wood += 2;
-    floatText(n.x, n.baseY - 60, "+2 🪵", "#e8c68a");
-    spawnParts(n.x, n.baseY - 50, 8, "#a3703f", { up: true, sp: 150 });
-    spawnParts(n.x + (Math.random() - 0.5) * 30, n.baseY - 80, 5, "#6fbf62", { up: true, sp: 80, g: 250, decay: 1 });
-    sfx("chop");
-    if (!ms.wood) { ms.wood = true; toast("🪵 Первое дерево срублено!"); }
-  } else {
-    inv.stone += 2;
-    floatText(n.x, n.baseY - 30, "+2 🪨", "#d7deeb");
-    spawnParts(n.x, n.baseY - 16, 8, "#9aa3b2", { up: true, sp: 160 });
-    sfx("mine");
-    if (!ms.stone) { ms.stone = true; toast("🪨 Камень добыт!"); }
-  }
-  checkMilestones();
-  if (n.hp <= 0) {
-    n.dead = true; n.fall = 0;
-    if (n.type === "tree") { inv.wood += 2; floatText(n.x, n.baseY - 80, "+2 🪵", "#e8c68a"); }
-    else { inv.stone += 2; floatText(n.x, n.baseY - 40, "+2 🪨", "#d7deeb"); spawnParts(n.x, n.baseY - 20, 16, "#8b93a3", { up: true, sp: 200 }); }
-  }
-}
-function mouseWorld() { return { x: mouse.x + camX, y: mouse.y + camY }; }
-
-function placeCheck(gx, gy) {
-  const cx = gx * GRID + GRID / 2, cyTop = gy * GRID;
-  const slot = SLOTS[sel];
-  if (occ.has(cellKey(gx, gy))) return "Здесь уже что-то стоит";
-  const dist = Math.hypot(cx - c.x, cyTop + 16 - (c.y - 30));
-  if (dist > PLACE_DIST) return "Слишком далеко";
-  // не ставить внутрь персонажа
-  if (Math.abs(cx - c.x) < 30 && cyTop + GRID > c.y - 60 && cyTop < c.y) return "Персонаж мешает";
-  // опора: земля или соседний блок
-  const grounded = heightAt(cx) >= cyTop + GRID - 6;
-  const nb = occ.has(cellKey(gx - 1, gy)) || occ.has(cellKey(gx + 1, gy)) ||
-             occ.has(cellKey(gx, gy - 1)) || occ.has(cellKey(gx, gy + 1));
-  if (slot.id === "fire") {
-    if (!grounded && !nb) return "Костру нужна опора";
-  } else if (!grounded && !nb) {
-    return "Нужна опора (земля или блок)";
-  }
-  return null;
-}
-function tryPlace() {
-  const w = mouseWorld();
-  const gx = Math.floor(w.x / GRID), gy = Math.floor(w.y / GRID);
-  const slot = SLOTS[sel];
-  const err = placeCheck(gx, gy);
-  if (err) { if (errCd <= 0) { toast("⛔ " + err, 1400); sfx("error"); errCd = 0.9; } return; }
-  if (inv.wood < slot.wood || inv.stone < slot.stone) {
-    if (errCd <= 0) { toast("⛔ Не хватает ресурсов", 1400); sfx("error"); errCd = 0.9; }
-    return;
-  }
-  inv.wood -= slot.wood; inv.stone -= slot.stone;
-  const b = { gx, gy, t: slot.id, born: elapsed };
-  blocks.push(b); occ.set(cellKey(gx, gy), b);
-  c.face = gx * GRID + 16 >= c.x ? 1 : -1;
-  c.action = { type: "build", t: 0, dur: 0.32, tool: "hammer", hit: true };
-  sfx("place");
-  spawnParts(gx * GRID + 16, gy * GRID + 16, 6, "#c9a06a", { sp: 90 });
-  if (slot.id === "fire" && !ms.fire) {
-    ms.fire = true;
-    toast("🔥 Костёр горит — база основана! Ночью он освещает площадку");
-    sfx("win");
-  }
-  checkMilestones();
-  refreshHotbar();
-}
-function checkMilestones() {
-  if (!ms.v10 && blocks.length >= 10) {
-    ms.v10 = true; toast("🏠 База разрастается: 10 построек!", 3500); sfx("win");
-  }
-}
-
-/* ---------------- ВВОД ---------------- */
-window.addEventListener("keydown", (e) => {
-  if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault();
-  keys[e.code] = true;
-  if (e.repeat) return;
-  if (e.code === "Space" || e.code === "KeyW" || e.code === "ArrowUp") c.jumpBuf = 0.12;
-  if (e.code === "KeyM") toggleMute();
-  if (e.code === "Escape") { sel = 0; refreshHotbar(); }
-  const m = e.code.match(/^Digit([1-5])$/);
-  if (m) { sel = +m[1] - 1; refreshHotbar(); }
-  if (e.code === "KeyE" && sel === 0 && !c.action && swingCd <= 0) { startSwing(); swingCd = 0.1; }
-});
-window.addEventListener("keyup", (e) => { keys[e.code] = false; });
-window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; mouse.down = false; });
-
-cv.addEventListener("pointerdown", (e) => {
-  if (e.button === 2) { sel = 0; refreshHotbar(); return; }
-  if (e.button !== 0) return;
-  mouse.down = true;
-  mouse.x = e.clientX; mouse.y = e.clientY;
-  if (sel > 0) tryPlace();
-  else if (!c.action && swingCd <= 0) { startSwing(); swingCd = 0.1; }
-});
-cv.addEventListener("pointermove", (e) => { mouse.x = e.clientX; mouse.y = e.clientY; });
-window.addEventListener("pointerup", () => { mouse.down = false; });
-cv.addEventListener("contextmenu", (e) => e.preventDefault());
-window.addEventListener("wheel", (e) => {
-  sel = (sel + (e.deltaY > 0 ? 1 : -1) + SLOTS.length) % SLOTS.length;
-  refreshHotbar();
-}, { passive: true });
-
-/* ---------------- ФИЗИКА / ОБНОВЛЕНИЕ ---------------- */
-function updateCharacter(dt) {
-  const dir = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
-  const acc = c.onGround ? ACC : ACC * 0.55;
-  if (dir !== 0 && !(c.action && c.action.type === "swing")) {
-    c.vx += dir * acc * dt;
-    if (!c.action) c.face = dir;
-  } else {
-    const fr = (c.onGround ? 2300 : 500) * dt;
-    if (Math.abs(c.vx) <= fr) c.vx = 0; else c.vx -= Math.sign(c.vx) * fr;
-  }
-  c.vx = clamp(c.vx, -MAX_V, MAX_V);
-
-  // прыжок с буфером и «койотом»
-  c.jumpBuf = (c.jumpBuf || 0) - dt;
-  c.coyote = c.onGround ? 0.1 : (c.coyote || 0) - dt;
-  if (c.jumpBuf > 0 && c.coyote > 0) {
-    c.vy = JUMP_V; c.jumpBuf = 0; c.coyote = 0; c.onGround = false;
-  }
-
-  c.vy = Math.min(c.vy + GRAV * dt, 1300);
-  const prevY = c.y;
-  c.x += c.vx * dt;
-  c.y += c.vy * dt;
-  c.x = clamp(c.x, 30, W_WORLD - 30);
-
-  // приземление на постройки (платформы-«полукирпичи»)
-  let landed = false;
-  if (c.vy >= 0) {
-    for (const b of blocks) {
-      if (!SOLID[b.t]) continue;
-      const top = b.gy * GRID;
-      if (c.x > b.gx * GRID - 10 && c.x < b.gx * GRID + GRID + 10 &&
-          prevY <= top + 6 && c.y >= top) {
-        c.y = top; c.vy = 0; landed = true; break;
-      }
-    }
-  }
-  const g = heightAt(c.x);
-  if (c.y >= g) { c.y = g; c.vy = 0; landed = true; }
-  c.onGround = landed;
-
-  // фаза шага
-  c.ph += Math.abs(c.vx) * dt * 0.055;
-
-  // авто-повтор удара при удержании ЛКМ
-  swingCd -= dt; errCd -= dt;
-  if (sel === 0 && mouse.down && !c.action && swingCd <= 0) { startSwing(); swingCd = 0.12; }
-
-  // прогресс действия
-  const a = c.action;
-  if (a) {
-    a.t += dt;
-    if (a.type === "swing" && !a.hit && a.t >= a.dur * 0.48) {
-      a.hit = true;
-      const n = a.node;
-      if (n && !n.dead && Math.abs(n.x - c.x) < REACH + 25) applyHit(n);
-    }
-    if (a.t >= a.dur) c.action = null;
-  }
-}
-
-function updateNodes(dt) {
-  for (const n of nodes) {
-    n.shake *= Math.exp(-6 * dt);
-    if (n.dead) {
-      n.fall += dt;
-      if (n.fall > 1.2) {
-        n.respawn += dt;
-        if (n.respawn > (n.type === "tree" ? 45 : 70)) {
-          n.dead = false; n.hp = n.maxHp; n.fall = 0; n.respawn = 0; n.grow = 0;
-        }
-      }
-    } else if (n.grow < 4) {
-      n.grow += dt;
-    }
-  }
-}
-
-function updateParticles(dt) {
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const p = parts[i];
-    p.vy += p.g * dt;
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    p.life -= p.decay * dt;
-    if (p.life <= 0) parts.splice(i, 1);
-  }
-  for (let i = floaters.length - 1; i >= 0; i--) {
-    const f = floaters[i];
-    f.y -= 32 * dt; f.life -= 0.9 * dt;
-    if (f.life <= 0) floaters.splice(i, 1);
-  }
-}
-
-/* ---------------- ДЕНЬ / НОЧЬ ---------------- */
-const SKY = [
-  { t: 0.00, top: "#35306b", bot: "#ff9e6d" },
-  { t: 0.10, top: "#3f8fd6", bot: "#b8e0f5" },
-  { t: 0.50, top: "#3f8fd6", bot: "#b8e0f5" },
-  { t: 0.62, top: "#46316e", bot: "#ff8a5c" },
-  { t: 0.72, top: "#060a1c", bot: "#131f3d" },
-  { t: 0.95, top: "#060a1c", bot: "#131f3d" },
-  { t: 1.00, top: "#35306b", bot: "#ff9e6d" },
-];
-function skyColors() {
-  for (let i = 0; i < SKY.length - 1; i++) {
-    const a = SKY[i], b = SKY[i + 1];
-    if (dayT >= a.t && dayT <= b.t) {
-      const k = smooth((dayT - a.t) / (b.t - a.t));
-      return { top: lerpHex(a.top, b.top, k), bot: lerpHex(a.bot, b.bot, k) };
-    }
-  }
-  return { top: SKY[0].top, bot: SKY[0].bot };
-}
-function nightFactor() {
-  if (dayT < 0.55) return 0;
-  if (dayT < 0.7) return smooth((dayT - 0.55) / 0.15);
-  if (dayT < 0.93) return 1;
-  return 1 - smooth(clamp((dayT - 0.93) / 0.065, 0, 1));
-}
-const stars = [];
-for (let i = 0; i < 90; i++) stars.push({ x: hash(i * 13) , y: hash(i * 7) * 0.55, s: 0.8 + hash(i * 29) * 1.6, tw: 1 + hash(i * 3) * 3 });
-const clouds = [];
-for (let i = 0; i < 7; i++) clouds.push({ wx: hash(i * 31) * 3200, y: 60 + hash(i * 17) * 170, s: 0.7 + hash(i * 5) * 1.1, v: 5 + hash(i * 11) * 8 });
-
-/* ---------------- СБЕРЕЖЕНИЯ ---------------- */
-function save() {
+/* ---------------- ИГРА ОКОНЧЕНА ---------------- */
+let gameOverFlag = false;
+function gameOver(reason) {
+  if (gameOverFlag) return;
+  gameOverFlag = true;
+  sfx.lose();
+  let best = 0, bestKills = 0;
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify({
-      w: inv.wood, s: inv.stone, dayT, dayN, ms,
-      px: c.x, py: c.y,
-      blocks: blocks.map(b => [b.gx, b.gy, b.t]),
-    }));
-  } catch (e) { /* переполнение — игнорируем */ }
+    best = +localStorage.getItem("survTD_best") || 0;
+    bestKills = +localStorage.getItem("survTD_bestKills") || 0;
+    if (wave > best) { best = wave; localStorage.setItem("survTD_best", best); }
+    if (human.kills > bestKills) { bestKills = human.kills; localStorage.setItem("survTD_bestKills", bestKills); }
+  } catch (e) { /* ignore */ }
+  $("overTitle").textContent = reason.startsWith("Человек") ? "☠ Вы погибли" : "☠ База разрушена";
+  $("overStats").textContent =
+    `${reason}\n\nДней выжито: ${dayN - 1}\nВолн отбито: ${Math.max(wave - 1, 0)}\nЗомби убито: ${human.kills}\n` +
+    `Дом: ${HOUSE_NAMES[lv.house - 1]} (ур. ${lv.house})\nОружие: ${WEAPON_NAMES[lv.weapon - 1]}\n\n` +
+    `🏆 Рекорд: ${best} волн · ${bestKills} убийств`;
+  $("over").classList.add("show");
 }
-function load() {
-  try {
-    const d = JSON.parse(localStorage.getItem(SAVE_KEY));
-    if (!d) return false;
-    inv.wood = d.w || 0; inv.stone = d.s || 0;
-    dayT = d.dayT || 0.12; dayN = d.dayN || 1;
-    Object.assign(ms, d.ms || {});
-    c.x = d.px || 400; c.y = Math.min(d.py || heightAt(d.px || 400), heightAt(d.px || 400));
-    for (const [gx, gy, t] of d.blocks || []) {
-      const b = { gx, gy, t, born: 0 };
-      if (!occ.has(cellKey(gx, gy))) { blocks.push(b); occ.set(cellKey(gx, gy), b); }
-    }
-    return true;
-  } catch (e) { return false; }
+
+/* ---------------- ВРЕМЯ СУТОК ---------------- */
+let cycleT = 0.08;   // начинаем утром
+let dayN = 1;
+let elapsed = 0;
+let nightToastShown = false;
+function isNightNow() { return cycleT >= NIGHT_AT; }
+function nightFactorCalc() {
+  const t = cycleT;
+  if (t < 0.56) return 0;
+  if (t < 0.65) return smooth((t - 0.56) / 0.09);
+  if (t < 0.94) return 1;
+  return 1 - smooth(clamp((t - 0.94) / 0.06, 0, 1));
 }
-setInterval(() => save(), 5000);
-window.addEventListener("beforeunload", save);
+
+/* ---------------- КАМЕРА ---------------- */
+let camX = 0, camY = 0;
+function updateCamera(dt) {
+  const tx = clamp(human.x + Math.cos(human.dir) * 30 - VW / 2, -200, Math.max(W - VW + 200, -200));
+  const ty = clamp(human.y + Math.sin(human.dir) * 30 - VH / 2, -200, Math.max(H - VH + 200, -200));
+  const k = 1 - Math.exp(-5 * dt);
+  camX = lerp(camX, tx, k);
+  camY = lerp(camY, ty, k);
+}
 
 /* ---------------- РИСОВАНИЕ ---------------- */
-const w2sx = (x) => x - camX;
-const w2sy = (y) => y - camY;
+const w2sx = x => x - camX;
+const w2sy = y => y - camY;
 
-function drawSky(t) {
-  const sc = skyColors();
-  const grad = ctx.createLinearGradient(0, 0, 0, VH);
-  grad.addColorStop(0, sc.top); grad.addColorStop(1, sc.bot);
-  ctx.fillStyle = grad;
+function drawGround() {
+  ctx.fillStyle = "#4a7c3a";
   ctx.fillRect(0, 0, VW, VH);
-
-  // звёзды
-  const nf = nightFactor();
-  if (nf > 0.02) {
-    ctx.fillStyle = "#e8f0ff";
-    for (const s of stars) {
-      const sx = ((s.x * VW * 1.3 - camX * 0.02) % VW + VW) % VW;
-      const sy = s.y * VH;
-      ctx.globalAlpha = nf * (0.35 + 0.65 * Math.abs(Math.sin(t * s.tw + s.x * 20)));
-      ctx.fillRect(sx, sy, s.s, s.s);
+  // пятна травы (статичные по сетке)
+  const CS = 180;
+  const gx0 = Math.floor(camX / CS), gy0 = Math.floor(camY / CS);
+  for (let gy = gy0; gy <= (camY + VH) / CS + 1; gy++) {
+    for (let gx = gx0; gx <= (camX + VW) / CS + 1; gx++) {
+      const h1 = hash(gx * 3 + gy * 17);
+      if (h1 < 0.55) continue;
+      const px = gx * CS + hash(gx + gy * 5) * 120;
+      const py = gy * CS + hash(gx * 7 + gy) * 120;
+      ctx.fillStyle = h1 > 0.8 ? "rgba(94,144,66,0.5)" : "rgba(64,110,50,0.45)";
+      ctx.beginPath();
+      ctx.ellipse(w2sx(px), w2sy(py), 40 + h1 * 46, 26 + h1 * 30, h1 * 3, 0, 7);
+      ctx.fill();
     }
+  }
+  // граница мира
+  ctx.strokeStyle = "rgba(30,50,25,0.8)";
+  ctx.lineWidth = 6;
+  ctx.strokeRect(w2sx(0), w2sy(0), W, H);
+  // двор дома — утоптанная земля
+  const bx = w2sx(BASE.x), by = w2sy(BASE.y);
+  ctx.fillStyle = "rgba(120,90,55,0.35)";
+  ctx.beginPath(); ctx.ellipse(bx, by, HOME_R + 26, HOME_R + 8, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "rgba(140,105,62,0.4)";
+  ctx.beginPath(); ctx.ellipse(bx, by, HOME_R - 14, HOME_R - 26, 0, 0, 7); ctx.fill();
+}
+
+function drawStains() {
+  for (const s of stains) {
+    ctx.globalAlpha = clamp(s.life, 0, 1) * 0.8;
+    ctx.fillStyle = s.color;
+    ctx.beginPath(); ctx.ellipse(w2sx(s.x), w2sy(s.y), s.r, s.r * 0.7, 0, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawNode(n, t) {
+  const x = w2sx(n.x) + Math.sin(t * 40) * n.shake * 4;
+  const y = w2sy(n.y);
+  const s = n.scale * clamp(n.grow / 4, 0.15, 1);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.beginPath(); ctx.ellipse(3, 4, 16 * s, 7 * s, 0, 0, 7); ctx.fill();
+  if (n.dead) {
+    // пнёк
+    ctx.fillStyle = n.type === "tree" ? "#7a4f2a" : "#6e7686";
+    ctx.beginPath(); ctx.ellipse(0, 0, n.type === "tree" ? 8 : 13, n.type === "tree" ? 5 : 8, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = n.type === "tree" ? "#a3703f" : "#8b93a3";
+    ctx.beginPath(); ctx.ellipse(0, -2, n.type === "tree" ? 6 : 10, n.type === "tree" ? 4 : 6, 0, 0, 7); ctx.fill();
+    ctx.restore();
+    return;
+  }
+  if (n.type === "tree") {
+    ctx.fillStyle = "#5f3c1e";
+    ctx.beginPath(); ctx.arc(0, 0, 6 * s, 0, 7); ctx.fill();
+    const sway = Math.sin(t * 0.9 + n.seed * 9) * 1.5;
+    ctx.fillStyle = "#2f6b33";
+    ctx.beginPath(); ctx.arc(sway, -2, 22 * s, 0, 7); ctx.fill();
+    ctx.fillStyle = "#3f8b44";
+    ctx.beginPath(); ctx.arc(sway - 6 * s, -7 * s, 15 * s, 0, 7); ctx.arc(sway + 8 * s, 4 * s, 13 * s, 0, 7); ctx.fill();
+    ctx.fillStyle = "#4e9b4e";
+    ctx.beginPath(); ctx.arc(sway + 2 * s, -10 * s, 10 * s, 0, 7); ctx.fill();
+  } else if (n.type === "rock") {
+    ctx.beginPath();
+    const pts = 7;
+    for (let i = 0; i < pts; i++) {
+      const a = (i / pts) * Math.PI * 2 + n.seed * 3;
+      const r = (14 + hash(n.id * 31 + i) * 7) * s;
+      const px = Math.cos(a) * r, py = Math.sin(a) * r * 0.8;
+      if (i === 0) ctx.moveTo(px, py - 2); else ctx.lineTo(px, py - 2);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "#8b93a3"; ctx.fill();
+    ctx.fillStyle = "#6e7686";
+    ctx.beginPath(); ctx.ellipse(-4 * s, 2 * s, 7 * s, 5 * s, 0.4, 0, 7); ctx.fill();
+  } else {
+    // куст с ягодами
+    ctx.fillStyle = "#2f6b33";
+    ctx.beginPath(); ctx.arc(0, -2, 13 * s, 0, 7); ctx.fill();
+    ctx.fillStyle = "#3f8b44";
+    ctx.beginPath(); ctx.arc(-5 * s, -6 * s, 8 * s, 0, 7); ctx.arc(6 * s, -3 * s, 7 * s, 0, 7); ctx.fill();
+    if (n.hp > 0) {
+      ctx.fillStyle = "#e0524d";
+      const berries = 4;
+      for (let i = 0; i < berries; i++) {
+        const a = (i / berries) * Math.PI * 2 + n.seed * 6;
+        ctx.beginPath(); ctx.arc(Math.cos(a) * 7 * s, -3 + Math.sin(a) * 5 * s, 2.4, 0, 7); ctx.fill();
+      }
+    }
+  }
+  if (n.flash > 0.02) {
+    ctx.globalAlpha = n.flash * 0.5;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(0, -4, 18 * s, 0, 7); ctx.fill();
     ctx.globalAlpha = 1;
   }
-
-  const horizon = (GROUND - 90) - camY;
-  // солнце
-  if (dayT < 0.68) {
-    const u = clamp(dayT / 0.66, 0, 1);
-    const sx = VW * (0.08 + 0.84 * u);
-    const sy = horizon - Math.sin(u * Math.PI) * (VH * 0.45);
-    ctx.fillStyle = "rgba(255,220,120,0.25)";
-    ctx.beginPath(); ctx.arc(sx, sy, 46, 0, 7); ctx.fill();
-    ctx.fillStyle = "#ffdf7e";
-    ctx.beginPath(); ctx.arc(sx, sy, 26, 0, 7); ctx.fill();
-  }
-  // луна
-  if (dayT > 0.6) {
-    const v = clamp((dayT - 0.6) / 0.42, 0, 1);
-    const sx = VW * (0.08 + 0.84 * v);
-    const sy = horizon - Math.sin(v * Math.PI) * (VH * 0.45);
-    ctx.fillStyle = "#dfe7f5";
-    ctx.beginPath(); ctx.arc(sx, sy, 20, 0, 7); ctx.fill();
-    ctx.fillStyle = lerpHex("#060a1c", "#060a1c", 0); // цвет выреза = небо
-    ctx.fillStyle = skyColors().top;
-    ctx.beginPath(); ctx.arc(sx + 8, sy - 5, 16, 0, 7); ctx.fill();
-  }
-
-  // облака
-  for (const cl of clouds) {
-    const span = 3400;
-    let sx = ((cl.wx - camX * 0.35) % span + span) % span - 300;
-    if (sx > VW + 250) continue;
-    const sy = cl.y - camY * 0.5;
-    ctx.fillStyle = `rgba(255,255,255,${0.8 * (1 - nf * 0.55)})`;
-    ctx.beginPath();
-    ctx.ellipse(sx, sy, 44 * cl.s, 15 * cl.s, 0, 0, 7);
-    ctx.ellipse(sx + 30 * cl.s, sy + 4, 30 * cl.s, 12 * cl.s, 0, 0, 7);
-    ctx.ellipse(sx - 32 * cl.s, sy + 5, 26 * cl.s, 10 * cl.s, 0, 0, 7);
-    ctx.fill();
-    cl.wx += cl.v * 0.016; // медленный дрейф
-  }
+  ctx.restore();
 }
 
-function drawMountains() {
-  const nf = nightFactor();
-  const horizon = (GROUND - 90) - camY;
-  const layers = [
-    { p: 0.22, amp: 110, k: 0.0012, day: "#8fa8c8", night: "#1a2440" },
-    { p: 0.45, amp: 70, k: 0.0023, day: "#6d88ab", night: "#131c33" },
-  ];
-  for (const L of layers) {
-    ctx.fillStyle = lerpHex(L.day, L.night, nf * 0.9);
-    ctx.beginPath();
-    ctx.moveTo(0, VH);
-    for (let sx = 0; sx <= VW + 16; sx += 16) {
-      const wx = sx + camX * L.p;
-      const y = horizon - L.amp * (0.55 + 0.45 * Math.sin(wx * L.k)) - 18 * Math.sin(wx * L.k * 3.7);
-      ctx.lineTo(sx, y);
+function drawHouse(t) {
+  const x = w2sx(BASE.x) + (Math.random() - 0.5) * houseShake * 6;
+  const y = w2sy(BASE.y) + (Math.random() - 0.5) * houseShake * 6;
+  const l = lv.house;
+  ctx.save();
+  ctx.translate(x, y);
+
+  // ограда по уровню
+  if (l >= 3) {
+    const posts = l >= 4 ? 26 : 18;
+    for (let i = 0; i < posts; i++) {
+      const a = (i / posts) * Math.PI * 2 + 0.15;
+      const r = l >= 4 ? 96 : 84;
+      const px = Math.cos(a) * r, py = Math.sin(a) * r * 0.92;
+      ctx.fillStyle = l >= 4 ? "#7d8494" : "#7a4f2a";
+      ctx.beginPath(); ctx.arc(px, py, l >= 4 ? 5 : 4, 0, 7); ctx.fill();
+      ctx.fillStyle = "rgba(0,0,0,0.2)";
+      ctx.beginPath(); ctx.arc(px + 2, py + 2, 2.4, 0, 7); ctx.fill();
     }
-    ctx.lineTo(VW, VH);
-    ctx.closePath();
-    ctx.fill();
   }
-}
+  // башни цитадели
+  if (l >= 5) {
+    for (let i = 0; i < 4; i++) {
+      const a = Math.PI / 4 + i * Math.PI / 2;
+      const px = Math.cos(a) * 96, py = Math.sin(a) * 88;
+      ctx.fillStyle = "#8b93a3";
+      ctx.beginPath(); ctx.arc(px, py, 10, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ffd76e";
+      ctx.beginPath(); ctx.arc(px, py - 4, 3, 0, 7); ctx.fill();
+    }
+  }
 
-function drawTerrain() {
-  const x0 = camX - 24, x1 = camX + VW + 24;
-  ctx.beginPath();
-  ctx.moveTo(w2sx(x0), VH + 40);
-  for (let x = x0; x <= x1; x += 22) ctx.lineTo(w2sx(x), w2sy(heightAt(x)));
-  ctx.lineTo(w2sx(x1), VH + 40);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, w2sy(GROUND - 90), 0, VH + 40);
-  grad.addColorStop(0, "#7c5836"); grad.addColorStop(1, "#45301d");
-  ctx.fillStyle = grad;
-  ctx.fill();
-  // трава
-  ctx.beginPath();
-  for (let x = x0; x <= x1; x += 22) {
-    const y = w2sy(heightAt(x));
-    if (x === x0) ctx.moveTo(w2sx(x), y); else ctx.lineTo(w2sx(x), y);
-  }
-  ctx.strokeStyle = "#5aa14e"; ctx.lineWidth = 7; ctx.stroke();
-  ctx.strokeStyle = "#7ec96d"; ctx.lineWidth = 3; ctx.stroke();
-}
-
-function drawTree(n, t) {
-  const s = n.scale * clamp(n.grow / 3, 0.12, 1) * 1.15;
-  const x = w2sx(n.x) + Math.sin(t * 42) * n.shake * 5;
-  const y = w2sy(n.baseY);
-  ctx.save();
-  ctx.translate(x, y);
-  if (n.dead) {
-    const k = clamp(n.fall / 0.7, 0, 1);
-    ctx.rotate(k * k * (Math.PI / 2) * (n.seed > 0.5 ? 1 : -1));
-    ctx.globalAlpha = n.fall > 1.2 ? clamp(1 - (n.fall - 1.2) * 2, 0, 1) : 1;
-  }
-  ctx.scale(s, s);
-  // тень
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
-  ctx.beginPath(); ctx.ellipse(0, 2, 26, 6, 0, 0, 7); ctx.fill();
-  // ствол
-  ctx.fillStyle = "#7a4f2a";
-  ctx.fillRect(-5, -52, 10, 52);
-  ctx.fillStyle = "#5f3c1e";
-  ctx.fillRect(-5, -52, 3, 52);
-  // крона
-  const sway = Math.sin(t * 1.3 + n.seed * 9) * 2;
-  ctx.fillStyle = "#3f8b44";
-  ctx.beginPath(); ctx.arc(sway, -78, 30, 0, 7); ctx.fill();
-  ctx.fillStyle = "#4e9b4e";
-  ctx.beginPath(); ctx.arc(sway - 16, -64, 20, 0, 7); ctx.arc(sway + 18, -66, 22, 0, 7); ctx.fill();
-  ctx.fillStyle = "#66b95d";
-  ctx.beginPath(); ctx.arc(sway + 4, -92, 18, 0, 7); ctx.fill();
-  if (n.seed > 0.6) {
-    ctx.fillStyle = "#e0524d";
-    ctx.beginPath();
-    ctx.arc(-12, -70, 3.4, 0, 7); ctx.arc(14, -84, 3.4, 0, 7); ctx.arc(2, -58, 3.4, 0, 7);
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
-function drawRock(n) {
-  const s = n.scale * clamp(n.grow / 3, 0.12, 1);
-  const x = w2sx(n.x) + Math.sin(0) * n.shake * 3;
-  const y = w2sy(n.baseY);
-  ctx.save();
-  ctx.translate(x, y);
-  if (n.dead) {
-    const k = clamp(n.fall / 0.5, 0, 1);
-    ctx.scale(1 - k * 0.6, 1 - k * 0.6);
-    ctx.globalAlpha = n.fall > 1.2 ? clamp(1 - (n.fall - 1.2) * 2, 0, 1) : 1;
-  }
-  ctx.scale(s, s);
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
-  ctx.beginPath(); ctx.ellipse(0, 2, 30, 6, 0, 0, 7); ctx.fill();
-  ctx.beginPath();
-  const pts = 7;
-  for (let i = 0; i < pts; i++) {
-    const a = (i / pts) * Math.PI * 2;
-    const r = 22 + hash(n.id * 31 + i) * 12;
-    const px = Math.cos(a) * r * 1.25, py = Math.sin(a) * r * 0.75 - 14;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.fillStyle = "#8b93a3"; ctx.fill();
-  ctx.fillStyle = "#6e7686";
-  ctx.beginPath();
-  ctx.moveTo(-14, -4); ctx.lineTo(2, -26); ctx.lineTo(12, -8); ctx.lineTo(-2, 2);
-  ctx.closePath(); ctx.fill();
-  if (n.hp <= 2 && !n.dead) {
-    ctx.strokeStyle = "#4d5462"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-8, -20); ctx.lineTo(-2, -12); ctx.lineTo(-9, -5); ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawBlock(b, t) {
-  const x = w2sx(b.gx * GRID), y = w2sy(b.gy * GRID);
-  if (b.t === "fire") { drawFire(b, x, y, t); return; }
-  if (b.t === "platform") {
-    ctx.fillStyle = "#a9713d";
-    ctx.fillRect(x, y, GRID, 12);
-    ctx.fillStyle = "#8a5a30";
-    for (let i = 0; i < 2; i++) ctx.fillRect(x + 4 + i * 14, y, 3, 12);
-    ctx.fillStyle = "#6f4826";
-    ctx.fillRect(x + 3, y + 12, 4, 7); ctx.fillRect(x + GRID - 7, y + 12, 4, 7);
-  } else if (b.t === "wall") {
-    ctx.fillStyle = "#8a5a30"; ctx.fillRect(x, y, GRID, GRID);
-    ctx.fillStyle = "#754b27";
-    ctx.fillRect(x, y + 10, GRID, 3); ctx.fillRect(x, y + 22, GRID, 3);
-    ctx.fillStyle = "#c8b08a";
-    ctx.fillRect(x + 4, y + 4, 2, 2); ctx.fillRect(x + 26, y + 15, 2, 2);
-  } else if (b.t === "stone") {
-    ctx.fillStyle = "#7d8494"; ctx.fillRect(x, y, GRID, GRID);
-    ctx.strokeStyle = "#5f6674"; ctx.lineWidth = 2;
-    ctx.strokeRect(x + 1, y + 1, GRID - 2, GRID - 2);
-    ctx.beginPath();
-    ctx.moveTo(x, y + 16); ctx.lineTo(x + GRID, y + 16);
-    ctx.moveTo(x + 16, y); ctx.lineTo(x + 16, y + 16);
-    ctx.moveTo(x + 8, y + 16); ctx.lineTo(x + 8, y + GRID);
-    ctx.moveTo(x + 24, y + 16); ctx.lineTo(x + 24, y + GRID);
-    ctx.stroke();
-  }
-}
-
-function drawFire(b, x, y, t) {
-  const gx = x + GRID / 2, gy = y + GRID;
-  // брёвна
-  ctx.save();
-  ctx.translate(gx, gy);
+  // костёр (всегда)
+  const fl = Math.sin(t * 10) * 1.6;
   ctx.fillStyle = "#6f4826";
-  ctx.rotate(0.5); ctx.fillRect(-14, -4, 28, 6);
-  ctx.rotate(-1.0); ctx.fillRect(-14, -4, 28, 6);
-  ctx.restore();
-  // огонь
-  const fl = Math.sin(t * 11 + b.gx) * 2;
-  ctx.fillStyle = "rgba(255,122,42,0.85)";
-  ctx.beginPath(); ctx.ellipse(gx, gy - 16 + fl * 0.4, 11, 17 + fl, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = "rgba(255,176,58,0.9)";
-  ctx.beginPath(); ctx.ellipse(gx, gy - 12 + fl * 0.3, 7, 11 + fl * 0.7, 0, 0, 7); ctx.fill();
+  ctx.save(); ctx.translate(26, 30); ctx.rotate(0.5); ctx.fillRect(-10, -3, 20, 5); ctx.rotate(-1); ctx.fillRect(-10, -3, 20, 5); ctx.restore();
+  ctx.fillStyle = "rgba(255,122,42,0.9)";
+  ctx.beginPath(); ctx.ellipse(26, 24 + fl * 0.4, 8, 11 + fl, 0, 0, 7); ctx.fill();
   ctx.fillStyle = "#ffe9a8";
-  ctx.beginPath(); ctx.ellipse(gx, gy - 9, 3.6, 6 + fl * 0.5, 0, 0, 7); ctx.fill();
-  // дым
-  if (Math.random() < 0.09) {
-    parts.push({ x: gx + (Math.random() - 0.5) * 6, y: gy - 30, vx: (Math.random() - 0.5) * 12, vy: -26 - Math.random() * 14, g: -14, life: 1, decay: 0.55, size: 3 + Math.random() * 3, color: "rgba(150,150,160,0.4)" });
+  ctx.beginPath(); ctx.ellipse(26, 26, 3.4, 5.4, 0, 0, 7); ctx.fill();
+  if (Math.random() < 0.06) parts.push({ x: BASE.x + 26, y: BASE.y + 20, vx: (Math.random() - 0.5) * 10, vy: -24, g: -12, life: 1, decay: 0.6, size: 3, color: "rgba(150,150,160,0.4)" });
+
+  // жильё
+  if (l === 1) {
+    // шалаш-навес
+    ctx.fillStyle = "#8a5a30";
+    ctx.beginPath(); ctx.moveTo(-40, 6); ctx.lineTo(-12, -34); ctx.lineTo(16, 6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#754b27";
+    ctx.beginPath(); ctx.moveTo(-30, 6); ctx.lineTo(-12, -22); ctx.lineTo(6, 6); ctx.closePath(); ctx.fill();
+  } else {
+    // хижина/дом сверху: сруб
+    const hs = 26 + l * 4;
+    ctx.fillStyle = "#8a5a30";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(-hs, -hs * 0.8, hs * 2, hs * 1.6, 8) : ctx.rect(-hs, -hs * 0.8, hs * 2, hs * 1.6); ctx.fill();
+    ctx.strokeStyle = "#5f3c1e";
+    ctx.lineWidth = 3;
+    for (let i = -hs + 10; i < hs; i += 12) {
+      ctx.beginPath(); ctx.moveTo(i, -hs * 0.8 + 3); ctx.lineTo(i, hs * 0.8 - 3); ctx.stroke();
+    }
+    // конёк крыши
+    ctx.strokeStyle = "#c8b08a";
+    ctx.lineWidth = 6; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(-hs * 0.75, 0); ctx.lineTo(hs * 0.75, 0); ctx.stroke();
+    if (l >= 4) {
+      ctx.fillStyle = "#7d8494";
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(-hs - 6, -hs * 0.8 - 6, hs * 2 + 12, hs * 1.6 + 12, 10) : ctx.rect(-hs - 6, -hs * 0.8 - 6, hs * 2 + 12, hs * 1.6 + 12); ctx.fill();
+      ctx.strokeStyle = "#5f6674"; ctx.lineWidth = 2;
+      ctx.strokeRect(-hs - 6, -hs * 0.8 - 6, hs * 2 + 12, hs * 1.6 + 12);
+    }
+    // флажок
+    ctx.strokeStyle = "#5f3c1e"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(hs * 0.5, -hs * 0.8); ctx.lineTo(hs * 0.5, -hs * 0.8 - 16); ctx.stroke();
+    ctx.fillStyle = l >= 4 ? "#ffd76e" : "#e0524d";
+    ctx.beginPath(); ctx.moveTo(hs * 0.5, -hs * 0.8 - 16); ctx.lineTo(hs * 0.5 + 12, -hs * 0.8 - 12); ctx.lineTo(hs * 0.5, -hs * 0.8 - 8); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // полоса HP дома
+  if (house.hp < house.maxHp) {
+    drawBar(w2sx(BASE.x), w2sy(BASE.y) - (lv.house === 1 ? 52 : lv.house * 4 + 46), 64, house.hp / house.maxHp, "#7ec96d");
   }
 }
 
-function drawArmArm(sx, sy, ang, len) {
-  const hx = sx + Math.sin(ang) * len, hy = sy + Math.cos(ang) * len;
-  ctx.strokeStyle = "#2f5a8a"; ctx.lineWidth = 7; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hx, hy); ctx.stroke();
-  ctx.fillStyle = "#f0c090";
-  ctx.beginPath(); ctx.arc(hx, hy, 3.6, 0, 7); ctx.fill();
-  return { hx, hy };
+function drawBar(sx, sy, w, frac, color) {
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(sx - w / 2 - 1, sy - 1, w + 2, 6);
+  ctx.fillStyle = color;
+  ctx.fillRect(sx - w / 2, sy, w * clamp(frac, 0, 1), 4);
 }
 
-function drawTool(hx, hy, ang, tool) {
+function drawWeapon(sx, sy, dir, ang, lvl) {
+  // ang — угол оружия относительно dir
   ctx.save();
-  ctx.translate(hx, hy);
-  ctx.rotate(ang + 0.85);
-  if (tool === "axe") {
-    ctx.fillStyle = "#8a5a30"; ctx.fillRect(-2, -4, 5, 26);
-    ctx.fillStyle = "#b8c2cf";
-    ctx.beginPath(); ctx.moveTo(3, -4); ctx.lineTo(15, -1); ctx.lineTo(13, 8); ctx.lineTo(3, 6);
-    ctx.closePath(); ctx.fill();
-    ctx.fillStyle = "#8f99a8";
-    ctx.fillRect(3, -1, 3, 6);
-  } else if (tool === "pick") {
-    ctx.fillStyle = "#8a5a30"; ctx.fillRect(-2, -4, 5, 26);
-    ctx.strokeStyle = "#9aa3b2"; ctx.lineWidth = 5; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.arc(2, 2, 13, -Math.PI * 0.85, -Math.PI * 0.15); ctx.stroke();
-  } else if (tool === "hammer") {
-    ctx.fillStyle = "#8a5a30"; ctx.fillRect(-2, -4, 5, 22);
-    ctx.fillStyle = "#8f99a8"; ctx.fillRect(-7, -10, 16, 9);
+  ctx.translate(sx, sy);
+  ctx.rotate(dir + ang);
+  const a2 = ang;
+  ctx.rotate(0);
+  if (lvl === 1) {
+    // дубина
+    ctx.fillStyle = "#8a5a30";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(8, -2.4, 24, 4.8, 2.4) : ctx.rect(8, -2.4, 24, 4.8); ctx.fill();
+    ctx.fillStyle = "#a3703f";
+    ctx.beginPath(); ctx.arc(32, 0, 4.6, 0, 7); ctx.fill();
+  } else if (lvl === 2) {
+    ctx.fillStyle = "#8a5a30"; ctx.fillRect(8, -1.8, 24, 3.6);
+    ctx.fillStyle = "#9aa3b2";
+    ctx.beginPath(); ctx.moveTo(28, -8); ctx.lineTo(37, -6); ctx.lineTo(36, 6); ctx.lineTo(28, 8); ctx.closePath(); ctx.fill();
+  } else if (lvl === 3) {
+    ctx.fillStyle = "#8a5a30"; ctx.fillRect(6, -1.4, 34, 2.8);
+    ctx.fillStyle = "#c8d0dc";
+    ctx.beginPath(); ctx.moveTo(40, -3); ctx.lineTo(48, 0); ctx.lineTo(40, 3); ctx.closePath(); ctx.fill();
+  } else if (lvl === 4) {
+    ctx.fillStyle = "#6e5236"; ctx.fillRect(8, -2, 22, 4);
+    ctx.fillStyle = "#8b93a3";
+    ctx.beginPath(); ctx.arc(32, 0, 7.4, 0, 7); ctx.fill();
+    ctx.fillStyle = "#6e7686";
+    ctx.beginPath(); ctx.arc(30.4, -1.6, 5, 0, 7); ctx.fill();
+  } else {
+    ctx.fillStyle = "#5f3c1e"; ctx.fillRect(6, -2.2, 30, 4.4);
+    ctx.fillStyle = "#c8d0dc";
+    ctx.beginPath(); ctx.moveTo(32, -11); ctx.lineTo(44, -7); ctx.lineTo(43, 7); ctx.lineTo(32, 11); ctx.closePath(); ctx.fill();
   }
   ctx.restore();
 }
 
-function swingArmAngle(k) {
-  // 0..1 -> угол руки: замах -> удар -> возврат
-  if (k < 0.3) return lerp(-0.5, -2.3, k / 0.3);
-  if (k < 0.5) { const u = (k - 0.3) / 0.2; return lerp(-2.3, 0.7, u * u * u); }
-  const u = (k - 0.5) / 0.5;
-  return lerp(0.7, -0.5, smooth(u));
-}
-
-function drawCharacter(t) {
-  const x = w2sx(c.x), y = w2sy(c.y);
-  const sf = clamp(Math.abs(c.vx) / MAX_V, 0, 1);
-  const air = !c.onGround;
-  // тень на земле
-  const gy = heightAt(c.x);
-  ctx.fillStyle = "rgba(0,0,0,0.2)";
-  ctx.beginPath();
-  ctx.ellipse(x, w2sy(gy) - 2, 18 * clamp(1 - (gy - c.y) / 300, 0.3, 1), 5, 0, 0, 7);
-  ctx.fill();
-
+function drawHuman(t) {
+  const x = w2sx(human.x), y = w2sy(human.y);
+  const L = human.look;
+  const moving = human.ph !== 0 && !human.combatStale;
+  const swing = Math.sin(human.ph);
   ctx.save();
   ctx.translate(x, y);
-  ctx.scale(c.face, 1);
 
-  const ph = c.ph, legA = Math.sin(ph) * 0.65 * sf;
-  const breathe = 1 + (sf < 0.05 && !c.action ? Math.sin(t * 2.2) * 0.02 : 0);
+  // тень
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.beginPath(); ctx.ellipse(2, 4, 13, 8, 0, 0, 7); ctx.fill();
 
-  // задняя нога
-  ctx.save();
-  ctx.translate(-2, -26); ctx.rotate(air ? -0.5 : -legA);
-  ctx.strokeStyle = "#33507c"; ctx.lineWidth = 8; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 24); ctx.stroke();
-  ctx.fillStyle = "#4a3625"; ctx.fillRect(-5, 20, 12, 6);
-  ctx.restore();
-  // задняя рука
-  const backA = air ? -1.4 : -Math.sin(ph) * 0.45 * sf - 0.08;
-  drawArmArm(-3, -46, backA, 19);
+  ctx.rotate(human.dir);
 
-  // торс + рюкзак
-  ctx.save();
-  ctx.scale(1, breathe);
-  ctx.fillStyle = "#3b6ea5";
-  ctx.beginPath();
-  ctx.roundRect ? ctx.roundRect(-9, -52, 19, 28, 5) : ctx.rect(-9, -52, 19, 28);
-  ctx.fill();
-  ctx.fillStyle = "#2b527c";
-  ctx.fillRect(-9, -30, 19, 5); // ремень
-  ctx.fillStyle = "#7a5230";
-  ctx.beginPath();
-  ctx.roundRect ? ctx.roundRect(-17, -48, 9, 20, 3) : ctx.rect(-17, -48, 9, 20);
-  ctx.fill();
-  ctx.restore();
+  // ступни
+  ctx.fillStyle = "#5d4430";
+  ctx.beginPath(); ctx.ellipse(1 + swing * 4.5, -5.5, 3.4, 2.6, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(1 - swing * 4.5, 5.5, 3.4, 2.6, 0, 0, 7); ctx.fill();
 
-  // передняя нога
-  ctx.save();
-  ctx.translate(3, -26); ctx.rotate(air ? 0.45 : legA);
-  ctx.strokeStyle = "#3b6ea5"; ctx.lineWidth = 8; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 24); ctx.stroke();
-  ctx.fillStyle = "#5d4430"; ctx.fillRect(-5, 20, 13, 6);
-  ctx.restore();
+  // левая рука (в боку, качается)
+  const lA = swing * 0.5;
+  ctx.fillStyle = L.skin;
+  ctx.beginPath(); ctx.arc(2 - lA * 3, -10.5, 3.4, 0, 7); ctx.fill();
+
+  // тело (шкура)
+  ctx.fillStyle = L.fur;
+  ctx.beginPath(); ctx.arc(0, 0, 10.4, 0, 7); ctx.fill();
+  ctx.fillStyle = L.furDark;
+  ctx.beginPath(); ctx.arc(-3, 0, 8.6, Math.PI * 0.55, Math.PI * 1.45); ctx.fill();
+  // пояс
+  ctx.strokeStyle = "#7a4f2a"; ctx.lineWidth = 2.4;
+  ctx.beginPath(); ctx.arc(0, 0, 9.4, -0.5, 0.5); ctx.stroke();
 
   // голова
-  const bob = Math.sin(ph * 2) * 1.2 * sf;
+  ctx.fillStyle = L.skin;
+  ctx.beginPath(); ctx.arc(3, 0, 7.4, 0, 7); ctx.fill();
+  // волосы (сзади головы)
+  ctx.fillStyle = L.hair;
+  ctx.beginPath(); ctx.arc(3, 0, 7.4, Math.PI * 0.42, Math.PI * 1.58); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0.4, 0, 3.4, 6.6, 0, 0, 7); ctx.fill();
+  // повязка
+  ctx.strokeStyle = "#c0563e"; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.arc(3, 0, 7.1, -Math.PI * 0.32, Math.PI * 0.32); ctx.stroke();
+  // нос
+  ctx.fillStyle = L.skinDark;
+  ctx.beginPath(); ctx.arc(10.2, 0, 1.7, 0, 7); ctx.fill();
+
+  // правая рука + оружие
+  if (human.attackT < 1) {
+    // замах: от -1.6 до +1.5
+    const k = human.attackT;
+    const e = k < 0.35 ? -(k / 0.35) * 0.9 : k < 0.55 ? lerp(-0.9, 1.5, ((k - 0.35) / 0.2) ** 2) : lerp(1.5, 0, smooth((k - 0.55) / 0.45));
+    const ang = -0.55 + e;
+    ctx.fillStyle = L.skin;
+    ctx.beginPath(); ctx.arc(Math.cos(ang) * 11, Math.sin(ang) * 11 + 2, 3.4, 0, 7); ctx.fill();
+    drawWeapon(Math.cos(ang) * 11, Math.sin(ang) * 11 + 2, 0, ang, lv.weapon);
+  } else {
+    const ang = 0.5 + swing * 0.25;
+    ctx.fillStyle = L.skin;
+    ctx.beginPath(); ctx.arc(Math.cos(ang) * 11, Math.sin(ang) * 11 + 2, 3.4, 0, 7); ctx.fill();
+    drawWeapon(Math.cos(ang) * 11, Math.sin(ang) * 11 + 2, 0, ang, lv.weapon);
+  }
+
+  // еда: crumbs
+  if (human.eatT > 0) {
+    ctx.fillStyle = "#e0524d";
+    ctx.beginPath(); ctx.arc(9, -3, 1.6, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+
+  // полоса HP
+  if (human.hp < human.maxHp) drawBar(x, y - 26, 34, human.hp / human.maxHp, "#ff8a6a");
+}
+
+function drawZombie(z) {
+  const x = w2sx(z.x), y = w2sy(z.y);
   ctx.save();
-  ctx.translate(2, -52 + bob);
-  ctx.fillStyle = "#f0c090";
-  ctx.beginPath(); ctx.arc(0, -9, 11, 0, 7); ctx.fill();
-  // кепка
-  ctx.fillStyle = "#e07b39";
-  ctx.beginPath(); ctx.arc(0, -12, 11, Math.PI, 0); ctx.fill();
-  ctx.fillRect(0, -14, 14, 4);
-  // глаз
-  ctx.fillStyle = "#22283a";
-  ctx.beginPath(); ctx.arc(5.5, -9, 1.9, 0, 7); ctx.fill();
+  ctx.translate(x, y);
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.beginPath(); ctx.ellipse(2, 4, 12, 7.4, 0, 0, 7); ctx.fill();
+  ctx.rotate(z.dir);
+  const lurch = Math.sin(z.lurch * 3.1);
+  // ступни шаркают
+  ctx.fillStyle = "#3a4d2a";
+  ctx.beginPath(); ctx.ellipse(1 + lurch * 3, -5, 3, 2.4, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(1 - lurch * 3, 5, 3, 2.4, 0, 0, 7); ctx.fill();
+  // вытянутые руки вперёд
+  const reach = z.attackT < 1 ? 4 + (1 - z.attackT) * 6 : 0;
+  ctx.fillStyle = z.g1;
+  ctx.beginPath(); ctx.arc(11 + reach + lurch * 1.4, -6.6, 3.2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(11 + reach - lurch * 1.4, 6.6, 3.2, 0, 7); ctx.fill();
+  // тело
+  ctx.fillStyle = z.g2;
+  ctx.beginPath(); ctx.arc(0, 0, 10, 0, 7); ctx.fill();
+  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  ctx.beginPath(); ctx.arc(-3, 0, 8, Math.PI * 0.55, Math.PI * 1.45); ctx.fill();
+  // рваная одежда — пятна
+  ctx.fillStyle = "rgba(60,70,50,0.5)";
+  ctx.beginPath(); ctx.arc(2, -4, 3, 0, 7); ctx.arc(-1, 3, 2.6, 0, 7); ctx.fill();
+  // голова
+  ctx.fillStyle = z.g1;
+  ctx.beginPath(); ctx.arc(3.4, 0, 7, 0, 7); ctx.fill();
+  // клоки волос
+  ctx.fillStyle = "#26301c";
+  ctx.beginPath(); ctx.arc(1, -3, 2.4, 0, 7); ctx.arc(0.4, 2.6, 2, 0, 7); ctx.arc(2.4, 0.4, 2, 0, 7); ctx.fill();
+  // глаза
+  const eg = z.attackT < 1 ? "#ff3b30" : "#e0472e";
+  ctx.fillStyle = eg;
+  ctx.beginPath(); ctx.arc(7.6, -2.6, 1.5, 0, 7); ctx.arc(7.6, 2.6, 1.5, 0, 7); ctx.fill();
+  if (z.flash > 0.02) {
+    ctx.globalAlpha = z.flash * 0.6;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(0, 0, 12, 0, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
   ctx.restore();
-
-  // передняя рука + инструмент
-  let armA = air ? -1.8 : Math.sin(ph) * 0.45 * sf + 0.08;
-  let tool = "axe";
-  const a = c.action;
-  if (a && (a.type === "swing" || a.type === "build")) {
-    armA = swingArmAngle(clamp(a.t / a.dur, 0, 1));
-    tool = a.tool || "axe";
-    // лёгкий наклон корпуса в ударе
-    ctx.rotate(clamp((armA + 2.3) * 0.06, 0, 0.16));
-  }
-  const hand = drawArmArm(3, -46, armA, 20);
-  drawTool(hand.hx, hand.hy, armA, tool);
-
-  ctx.restore();
+  drawBar(x, y - 24, 30, z.hp / z.maxHp, "#8fce6a");
 }
 
-function drawGhost() {
-  if (sel === 0) return;
-  const w = mouseWorld();
-  const gx = Math.floor(w.x / GRID), gy = Math.floor(w.y / GRID);
-  const x = gx * GRID, y = gy * GRID;
-  const err = placeCheck(gx, gy);
-  const slot = SLOTS[sel];
-  const poor = inv.wood < slot.wood || inv.stone < slot.stone;
-  const ok = !err && !poor;
-  ctx.fillStyle = ok ? "rgba(120,220,140,0.25)" : "rgba(230,90,90,0.22)";
-  ctx.strokeStyle = ok ? "rgba(140,240,160,0.9)" : "rgba(240,110,110,0.9)";
-  ctx.lineWidth = 2;
-  ctx.fillRect(x - camX, y - camY, GRID, GRID);
-  ctx.strokeRect(x - camX, y - camY, GRID, GRID);
-  // иконка внутри
-  ctx.font = "16px system-ui";
-  ctx.textAlign = "center";
-  ctx.fillText(slot.icon, x - camX + GRID / 2, y - camY + 22);
+function drawCorpses() {
+  for (const c of corpses) {
+    ctx.save();
+    ctx.translate(w2sx(c.x), w2sy(c.y));
+    ctx.globalAlpha = clamp(c.life, 0, 1) * 0.9;
+    ctx.rotate(c.dir + 0.8);
+    ctx.fillStyle = c.skin;
+    ctx.beginPath(); ctx.ellipse(0, 0, 12, 7, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.15)";
+    ctx.beginPath(); ctx.ellipse(-6, 0, 5, 4, 0, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
 }
 
-function drawDarkness(t) {
-  const nf = nightFactor();
-  if (nf < 0.02) return;
-  dkx.clearRect(0, 0, VW, VH);
-  dkx.fillStyle = `rgba(6,9,26,${0.82 * nf})`;
-  dkx.fillRect(0, 0, VW, VH);
-  dkx.globalCompositeOperation = "destination-out";
-  function punch(wx, wy, r, str) {
-    const x = w2sx(wx), y = w2sy(wy);
-    if (x < -r || x > VW + r) return;
-    const g = dkx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, `rgba(0,0,0,${str})`);
-    g.addColorStop(0.6, `rgba(0,0,0,${str * 0.55})`);
-    g.addColorStop(1, "rgba(0,0,0,0)");
-    dkx.fillStyle = g;
-    dkx.beginPath(); dkx.arc(x, y, r, 0, 7); dkx.fill();
-  }
-  for (const b of blocks) {
-    if (b.t !== "fire") continue;
-    punch(b.gx * GRID + 16, b.gy * GRID + 6, 250 + Math.sin(t * 9 + b.gx) * 14, 0.96);
-  }
-  punch(c.x, c.y - 28, 130, 0.8);
-  dkx.globalCompositeOperation = "source-over";
-  ctx.drawImage(dk, 0, 0, VW, VH);
-  // тёплое свечение костров
-  for (const b of blocks) {
-    if (b.t !== "fire") continue;
-    const x = w2sx(b.gx * GRID + 16), y = w2sy(b.gy * GRID + 6);
-    const g = ctx.createRadialGradient(x, y, 0, x, y, 90);
-    g.addColorStop(0, `rgba(255,160,60,${0.22 * nf})`);
-    g.addColorStop(1, "rgba(255,160,60,0)");
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, 90, 0, 7); ctx.fill();
-  }
-}
-
-function drawTargetHighlight(t) {
-  if (sel !== 0 || c.action) return;
-  const n = findTarget();
-  if (!n) return;
-  const x = w2sx(n.x), y = w2sy(n.type === "tree" ? n.baseY - 55 : n.baseY - 18);
-  ctx.strokeStyle = `rgba(255,255,255,${0.45 + 0.3 * Math.sin(t * 5)})`;
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(x, y, n.type === "tree" ? 42 : 30, 0, 7); ctx.stroke();
-}
-
-function drawParticles() {
+function drawFx() {
   for (const p of parts) {
     ctx.globalAlpha = clamp(p.life, 0, 1);
     ctx.fillStyle = p.color;
     ctx.fillRect(w2sx(p.x) - p.size / 2, w2sy(p.y) - p.size / 2, p.size, p.size);
   }
   ctx.globalAlpha = 1;
-}
-function drawFloaters() {
   ctx.font = "bold 13px system-ui";
   ctx.textAlign = "center";
-  for (const f of floaters) {
-    ctx.globalAlpha = clamp(f.life * 1.4, 0, 1);
-    ctx.fillStyle = "rgba(0,0,0,0.5)";
+  for (const f of texts) {
+    const sz = f.big ? 17 : 13;
+    ctx.font = `bold ${sz}px system-ui`;
+    ctx.globalAlpha = clamp(f.life * 1.3, 0, 1);
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fillText(f.txt, w2sx(f.x) + 1, w2sy(f.y) + 1);
     ctx.fillStyle = f.color;
     ctx.fillText(f.txt, w2sx(f.x), w2sy(f.y));
@@ -932,90 +1151,197 @@ function drawFloaters() {
   ctx.globalAlpha = 1;
 }
 
-/* ---------------- СВЕТЛЯЧКИ (ночью) ---------------- */
-const flies = [];
-for (let i = 0; i < 10; i++) flies.push({ x: hash(i * 3) * W_WORLD, y: 0, ph: hash(i * 9) * 7, sp: 12 + hash(i * 5) * 20 });
-function drawFlies(t, dt) {
-  const nf = nightFactor();
-  if (nf < 0.05) return;
-  for (const f of flies) {
-    f.x += Math.sin(t * 0.4 + f.ph) * f.sp * dt;
-    const gy = heightAt(f.x);
-    f.y = gy - 40 - Math.sin(t * 1.3 + f.ph) * 26;
-    const x = w2sx(f.x), y = w2sy(f.y);
-    if (x < -20 || x > VW + 20) continue;
-    const a = nf * (0.4 + 0.6 * Math.abs(Math.sin(t * 2.2 + f.ph * 3)));
-    ctx.fillStyle = `rgba(190,255,120,${a})`;
-    ctx.beginPath(); ctx.arc(x, y, 2, 0, 7); ctx.fill();
-  }
+function drawMoveMarker() {
+  if (!human.moveGoal) return;
+  const m = human.moveGoal;
+  const a = clamp(m.ttl / 6, 0, 1);
+  const r = 12 + Math.sin(elapsed * 7) * 3;
+  ctx.strokeStyle = `rgba(255,224,138,${0.85 * a})`;
+  ctx.lineWidth = 2.4;
+  ctx.beginPath(); ctx.arc(w2sx(m.x), w2sy(m.y), r, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(w2sx(m.x), w2sy(m.y), 3, 0, 7); ctx.fillStyle = `rgba(255,224,138,${a})`; ctx.fill();
 }
 
-/* ---------------- ЦИКЛ ---------------- */
+function drawDarkness(nf, t) {
+  if (nf < 0.02) return;
+  dkx.clearRect(0, 0, VW, VH);
+  dkx.fillStyle = `rgba(5,8,20,${0.84 * nf})`;
+  dkx.fillRect(0, 0, VW, VH);
+  dkx.globalCompositeOperation = "destination-out";
+  const punch = (wx, wy, r, str) => {
+    const x = w2sx(wx), y = w2sy(wy);
+    if (x < -r || x > VW + r || y < -r || y > VH + r) return;
+    const g = dkx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(0,0,0,${str})`);
+    g.addColorStop(0.6, `rgba(0,0,0,${str * 0.5})`);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    dkx.fillStyle = g;
+    dkx.beginPath(); dkx.arc(x, y, r, 0, 7); dkx.fill();
+  };
+  punch(BASE.x, BASE.y, 290 + Math.sin(t * 8) * 16, 0.97);   // костёр
+  punch(human.x, human.y, 130, 0.75);                        // человек
+  ctx.drawImage(dk, 0, 0, VW, VH);
+  // тёплое свечение костра
+  const bx = w2sx(BASE.x), by = w2sy(BASE.y);
+  const g = ctx.createRadialGradient(bx, by, 0, bx, by, 110);
+  g.addColorStop(0, `rgba(255,150,50,${0.25 * nf})`);
+  g.addColorStop(1, "rgba(255,150,50,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(bx, by, 110, 0, 7); ctx.fill();
+}
+
+function drawMiniMap() {
+  const mw = mini.width, mh = mini.height;
+  mx.setTransform(1, 0, 0, 1, 0, 0);
+  mx.fillStyle = "#26331f";
+  mx.fillRect(0, 0, mw, mh);
+  const kx = mw / W, ky = mh / H;
+  for (const n of nodes) {
+    if (n.dead) continue;
+    mx.fillStyle = n.type === "tree" ? "#3f8b44" : n.type === "rock" ? "#9aa3b2" : "#e0524d";
+    mx.fillRect(n.x * kx - 1, n.y * ky - 1, 2.4, 2.4);
+  }
+  // дом
+  mx.fillStyle = "#ffd76e";
+  mx.fillRect(BASE.x * kx - 3, BASE.y * ky - 3, 6, 6);
+  // зомби
+  mx.fillStyle = "#ff5a4d";
+  for (const z of zombies) mx.fillRect(z.x * kx - 1.4, z.y * ky - 1.4, 2.8, 2.8);
+  // человек
+  mx.fillStyle = "#ffffff";
+  mx.fillRect(human.x * kx - 2, human.y * ky - 2, 4, 4);
+  // рамка обзора
+  mx.strokeStyle = "rgba(255,255,255,0.35)";
+  mx.lineWidth = 1;
+  mx.strokeRect(camX * kx, camY * ky, VW * kx, VH * ky);
+}
+
+/* ---------------- ВНЕШНОСТЬ ---------------- */
+function genLook() {
+  const skins = ["#f0c090", "#e0a878", "#c88a5a", "#a06a42", "#8a5432"];
+  const hairs = ["#2a1c10", "#4a2f18", "#151310", "#6b4423", "#8a6a3a"];
+  const furs = ["#8a5a30", "#7a4f2a", "#96683c", "#6e4526", "#a0713f"];
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const skin = pick(skins);
+  return {
+    skin, hair: pick(hairs), fur: pick(furs),
+    skinDark: skin,
+  };
+}
+
+/* ---------------- СТАРТ / ЦИКЛ ---------------- */
 let last = performance.now();
+let msShown = { wood: false, night: false, wave1: false };
+
+function updateHUDTime() {
+  $("dayLabel").textContent = "День " + dayN + " · Волна " + Math.max(wave + (isNightNow() ? 0 : 1), 1);
+  const t = cycleT;
+  $("timefill").style.width = (t * 100).toFixed(1) + "%";
+  if (!isNightNow()) {
+    const sec = Math.ceil((NIGHT_AT - t) * DAY_LEN);
+    $("phaseLabel").textContent = "☀️ До ночи: " + sec + "с";
+  } else {
+    const sec = Math.ceil((1 - t) * DAY_LEN);
+    $("phaseLabel").textContent = "🌙 Зомби: " + zombies.length + " · До рассвета: " + sec + "с";
+  }
+  $("hpfill").style.width = clamp(human.hp / human.maxHp * 100, 0, 100) + "%";
+}
+
 function frame(now) {
   requestAnimationFrame(frame);
   let dt = Math.min((now - last) / 1000, 0.05);
   last = now;
+  if (paused || gameOverFlag) {
+    if (gameOverFlag) rendererPausedStill();
+    return;
+  }
+  dt *= speedMult;
   elapsed += dt;
-  const t = elapsed;
 
   // время суток
-  const prevDayT = dayT;
-  dayT += dt / DAY_LEN;
-  if (dayT >= 1) {
-    dayT -= 1; dayN++;
-    toast("🌅 Наступил день " + dayN);
-    if (blocks.some(b => b.t === "fire") && !ms.night) {
-      ms.night = true; toast("🌙 Первая ночь пережита! База жива", 3500); sfx("win");
-    }
-    save();
+  const wasNight = isNightNow();
+  cycleT += dt / DAY_LEN;
+  if (cycleT >= 1) {
+    cycleT -= 1;
+    dayN++;
+    wave = Math.max(wave, 1); // прошедшей ночью была волна
+    toast("🌅 День " + dayN + ". Успейте подготовиться!", 2800);
+    sfx.dawn();
+    refreshHUD();
   }
+  const isNight = isNightNow();
+  if (isNight && !wasNight) {
+    // наступила ночь — запускаем волну
+    wave++;
+    toSpawn = waveCount(wave);
+    spawnCd = 1.5;
+    toast("🌙 Ночь " + (dayN - 1) + "! Волна " + wave + " — " + toSpawn + " зомби идут к дому!", 4200);
+    sfx.horn();
+  }
+  const nf = nightFactorCalc();
 
-  updateCharacter(dt);
-  updateNodes(dt);
-  updateParticles(dt);
+  // затухание трясок/вспышек
+  hurtFlash *= Math.exp(-3 * dt);
+  houseShake *= Math.exp(-5 * dt);
+  for (const n of nodes) { n.shake *= Math.exp(-6 * dt); n.flash *= Math.exp(-8 * dt); }
 
-  // камера
-  const tx = clamp(c.x + c.face * 40 - VW / 2, 0, Math.max(W_WORLD - VW, 0));
-  const ty = clamp(c.y - VH * 0.62, -900, Math.max(GROUND + 150 - VH, -900));
-  const ck = 1 - Math.exp(-6 * dt);
-  camX = lerp(camX, tx, ck);
-  camY = lerp(camY, ty, ck);
-
-  // ---- отрисовка ----
-  drawSky(t);
-  drawMountains();
-  drawTerrain();
-  drawTargetHighlight(t);
+  // рост/возрождение ресурсов
   for (const n of nodes) {
-    if (w2sx(n.x) < -160 || w2sx(n.x) > VW + 160) continue;
-    if (n.type === "tree") drawTree(n, t); else drawRock(n);
+    if (n.dead) {
+      n.respawn += dt;
+      if (n.respawn > nodeRespawnTime(n.type)) { n.dead = false; n.hp = n.maxHp; n.grow = 0; }
+    } else if (n.grow < 4) n.grow += dt;
   }
-  for (const b of blocks) {
-    const x = w2sx(b.gx * GRID);
-    if (x < -60 || x > VW + 60) continue;
-    drawBlock(b, t);
-  }
-  drawGhost();
-  drawCharacter(t);
-  drawParticles();
-  drawFlies(t, dt);
-  drawDarkness(t);
-  drawFloaters();
 
-  updateHUD();
+  // регенерация у дома днём
+  if (!isNight && dist(human.x, human.y, BASE.x, BASE.y) < HOME_R && human.hp < human.maxHp) {
+    human.hp = Math.min(human.maxHp, human.hp + 1.6 * dt);
+  }
+
+  updateHuman(dt, isNight, nf);
+  updateZombies(dt, isNight, nf);
+  updateFx(dt);
+  updateCamera(dt);
+
+  // ---- рендер ----
+  drawGround();
+  drawStains();
+  // сортировка по y для псевдоглубины
+  const drawables = [];
+  for (const n of nodes) drawables.push({ y: n.y, f: () => drawNode(n, elapsed) });
+  drawables.push({ y: BASE.y, f: () => drawHouse(elapsed) });
+  drawables.push({ y: human.y, f: () => drawHuman(elapsed) });
+  for (const z of zombies) drawables.push({ y: z.y, f: () => drawZombie(z) });
+  drawables.sort((a, b) => a.y - b.y);
+  drawCorpses();
+  for (const d of drawables) d.f();
+  drawMoveMarker();
+  drawFx();
+  drawDarkness(nf, elapsed);
+  drawMiniMap();
+
+  // красная вспышка урона
+  if (hurtFlash > 0.02) {
+    ctx.fillStyle = `rgba(200,30,20,${hurtFlash * 0.25})`;
+    ctx.fillRect(0, 0, VW, VH);
+  }
+
+  updateHUDTime();
+
+  // подсказки по ходу
+  if (!msShown.wood && inv.wood >= 20) { msShown.wood = true; toast("🪐 Ресурсов хватает — человек сам построит улучшение у дома"); }
+  if (!msShown.wave1 && wave >= 1 && !isNight) { msShown.wave1 = true; }
 }
 
-/* ---------------- СТАРТ ---------------- */
+function rendererPausedStill() {
+  // при паузе просто держим последний кадр (ничего не перерисовываем)
+}
+
+/* ---------------- GO ---------------- */
+human.look = genLook();
 genWorld();
-const loaded = load();
-if (!loaded) {
-  toast("Добро пожаловать, колонист! 🪓 Руби деревья ЛКМ, строй базу слотами 2–5", 5200);
-} else {
-  toast("Игра загружена. Продолжай строить базу!", 3000);
-}
-camX = clamp(c.x - VW / 2, 0, W_WORLD - VW);
-camY = clamp(c.y - VH * 0.62, -900, Math.max(GROUND + 150 - VH, -900));
-refreshHotbar();
-updateHUD();
+camX = clamp(human.x - VW / 2, -200, W - VW + 200);
+camY = clamp(human.y - VH / 2, -200, H - VH + 200);
+refreshHUD();
+toast("🪓 Колонист всё делает сам: добирает ресурсы, носит их домой, строит и улучшает дом. ЛКМ — послать его в точку, 1/2/3 — приоритет улучшений. Ночью придёт первая волна!", 6500);
 requestAnimationFrame(frame);
