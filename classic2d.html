@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Первобытный выживач · 2D-классика</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #131a12; }
+    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #eef3e8; }
+    #cv { position: fixed; inset: 0; display: block; }
+    .hud { position: fixed; z-index: 10; user-select: none; }
+    #inv {
+      top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px;
+      background: rgba(14, 18, 12, .75); border: 1px solid rgba(255,255,255,.13);
+      padding: 10px 14px; border-radius: 14px; backdrop-filter: blur(6px);
+      font-size: 14.5px; font-weight: 700;
+    }
+    #inv .row { display: flex; gap: 8px; align-items: center; }
+    #inv .num { color: #ffd76e; min-width: 30px; }
+    #inv .bag { font-size: 12px; color: #9fb593; font-weight: 600; }
+    #hpwrap { width: 150px; height: 9px; border-radius: 6px; background: rgba(255,255,255,.12); overflow: hidden; }
+    #hpfill { height: 100%; width: 100%; background: linear-gradient(90deg,#e0524d,#ffb56b); border-radius: 6px; }
+    #topbar {
+      top: 12px; left: 50%; transform: translateX(-50%);
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      background: rgba(14, 18, 12, .75); border: 1px solid rgba(255,255,255,.13);
+      padding: 8px 16px; border-radius: 14px; backdrop-filter: blur(6px);
+    }
+    #dayLabel { font-size: 14px; font-weight: 800; }
+    #phaseLabel { font-size: 12px; color: #b8c9a8; font-weight: 600; }
+    #timebar { width: 230px; height: 8px; border-radius: 6px; overflow: hidden; background: #233020; }
+    #timefill { height: 100%; width: 0%; background: linear-gradient(90deg,#ffd76e,#ff9e5c,#7a5cff); }
+    #mmwrap {
+      top: 12px; right: 12px; background: rgba(14, 18, 12, .75);
+      border: 1px solid rgba(255,255,255,.13); border-radius: 14px; padding: 8px; backdrop-filter: blur(6px);
+    }
+    #mini { display: block; border-radius: 8px; }
+    #ctrls { bottom: 12px; left: 12px; display: flex; gap: 8px; align-items: flex-end; }
+    .prio {
+      min-width: 106px; cursor: pointer; text-align: left;
+      background: rgba(14, 18, 12, .75); border: 2px solid rgba(255,255,255,.14);
+      color: #dfe8d5; border-radius: 14px; padding: 8px 12px; font-size: 12px; font-weight: 700;
+      backdrop-filter: blur(6px);
+    }
+    .prio .ti { font-size: 15px; }
+    .prio .lv { color: #ffd76e; }
+    .prio .cost { display: block; font-size: 10.5px; color: #8fd48f; font-weight: 600; margin-top: 2px; }
+    .prio .cost.no { color: #e57373; }
+    .prio.sel { border-color: #ffd76e; box-shadow: 0 0 14px rgba(255,200,80,.3); }
+    .sqbtn {
+      width: 38px; height: 38px; border-radius: 12px; cursor: pointer;
+      background: rgba(14, 18, 12, .75); border: 1px solid rgba(255,255,255,.15);
+      color: #cfd9c5; font-size: 16px;
+    }
+    #help {
+      bottom: 12px; left: 50%; transform: translateX(-50%);
+      font-size: 12px; color: #a8b89a; white-space: nowrap;
+      background: rgba(10, 14, 8, .6); border: 1px solid rgba(150,190,120,.14);
+      padding: 6px 14px; border-radius: 10px; backdrop-filter: blur(6px);
+    }
+    #help b { color: #e4efd8; }
+    #toast {
+      top: 86px; left: 50%; transform: translateX(-50%) translateY(-8px);
+      font-size: 15px; font-weight: 700; color: #fffbe8; text-align: center;
+      background: rgba(50, 38, 10, .82); border: 1px solid rgba(255, 200, 80, .5);
+      padding: 9px 20px; border-radius: 12px; opacity: 0; pointer-events: none;
+      transition: opacity .3s, transform .3s; max-width: 520px;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #links { bottom: 12px; right: 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+    #links a {
+      font-size: 12px; color: #a8b89a; text-decoration: none;
+      background: rgba(10, 14, 8, .6); border: 1px solid rgba(150,190,120,.18);
+      padding: 6px 12px; border-radius: 10px;
+    }
+    #over {
+      position: fixed; inset: 0; z-index: 40; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(8, 4, 4, .78); backdrop-filter: blur(4px);
+    }
+    #over.show { display: flex; }
+    #overbox { background: #1a140f; border: 2px solid #6b4a2a; border-radius: 20px; padding: 34px 44px; text-align: center; max-width: 480px; }
+    #overTitle { font-size: 26px; font-weight: 900; color: #ff8a6a; margin-bottom: 12px; }
+    #overStats { font-size: 15px; color: #d8cba8; line-height: 1.7; margin-bottom: 20px; white-space: pre-line; }
+    #overBtn {
+      cursor: pointer; font-size: 16px; font-weight: 800; color: #2a1c0d;
+      background: linear-gradient(180deg, #ffd76e, #ffab3d); border: 0;
+      padding: 12px 34px; border-radius: 14px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+
+  <div class="hud" id="inv">
+    <div class="row">❤️ <div id="hpwrap"><div id="hpfill"></div></div></div>
+    <div class="row">🪵 <span class="num" id="inv-wood">0</span> 🪨 <span class="num" id="inv-stone">0</span> 🍒 <span class="num" id="inv-food">0</span></div>
+    <div class="row bag">Сумка: <span id="bagTxt">0 / 10</span></div>
+  </div>
+
+  <div class="hud" id="topbar">
+    <div id="dayLabel">День 1</div>
+    <div id="phaseLabel">☀️ До ночи: 80с</div>
+    <div id="timebar"><div id="timefill"></div></div>
+  </div>
+
+  <div class="hud" id="mmwrap"><canvas id="mini" width="156" height="114"></canvas></div>
+
+  <div class="hud" id="ctrls">
+    <button class="prio sel" id="prio-house"><span class="ti">🏠 Дом <span class="lv" id="lv-house">1</span></span><span class="cost" id="cost-house"></span></button>
+    <button class="prio" id="prio-weapon"><span class="ti">🪓 Оружие <span class="lv" id="lv-weapon">1</span></span><span class="cost" id="cost-weapon"></span></button>
+    <button class="prio" id="prio-bag"><span class="ti">🎒 Сумка <span class="lv" id="lv-bag">1</span></span><span class="cost" id="cost-bag"></span></button>
+    <button class="sqbtn" id="btnSpeed" title="Скорость">×1</button>
+    <button class="sqbtn" id="btnPause" title="Пауза (Space)">⏸</button>
+    <button class="sqbtn" id="btnMute" title="Звук (M)">🔊</button>
+  </div>
+
+  <div class="hud" id="toast"></div>
+  <div class="hud" id="help">
+    Он всё делает сам · <b>ЛКМ</b> — послать в точку · <b>1/2/3</b> — что улучшать · <b>Space</b> — пауза · <b>M</b> — звук
+  </div>
+  <div class="hud" id="links">
+    <a href="./index.html">🌐 Версия 2.5D</a>
+    <a href="./3d.html">🥊 3D-боксёр</a>
+  </div>
+
+  <div id="over"><div id="overbox">
+    <div id="overTitle">Игра окончена</div>
+    <div id="overStats"></div>
+    <button id="overBtn">Начать заново</button>
+  </div></div>
+
+  <script src="./game2d.js"></script>
+</body>
+</html>

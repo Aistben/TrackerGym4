@@ -3,12 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Первобытный выживач · зомби идут ночью</title>
+  <title>Первобытный выживач 2.5D · зомби идут ночью</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #131a12; }
     body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #eef3e8; }
-    #cv { position: fixed; inset: 0; display: block; }
+    #cv, #ov { position: fixed; inset: 0; display: block; }
+    #ov { pointer-events: none; z-index: 5; }
     .hud { position: fixed; z-index: 10; user-select: none; }
 
     #inv {
@@ -31,7 +32,7 @@
     }
     #dayLabel { font-size: 14px; font-weight: 800; }
     #phaseLabel { font-size: 12px; color: #b8c9a8; font-weight: 600; }
-    #timebar { width: 230px; height: 8px; border-radius: 6px; overflow: hidden; position: relative; background: #233020; }
+    #timebar { width: 230px; height: 8px; border-radius: 6px; overflow: hidden; background: #233020; }
     #timefill { height: 100%; width: 0%; background: linear-gradient(90deg,#ffd76e,#ff9e5c,#7a5cff); }
 
     #mmwrap {
@@ -40,9 +41,7 @@
     }
     #mini { display: block; border-radius: 8px; }
 
-    #ctrls {
-      bottom: 12px; left: 12px; display: flex; gap: 8px; align-items: flex-end;
-    }
+    #ctrls { bottom: 12px; left: 12px; display: flex; gap: 8px; align-items: flex-end; }
     .prio {
       min-width: 106px; cursor: pointer; text-align: left;
       background: rgba(14, 18, 12, .75); border: 2px solid rgba(255,255,255,.14);
@@ -74,9 +73,17 @@
       font-size: 15px; font-weight: 700; color: #fffbe8; text-align: center;
       background: rgba(50, 38, 10, .82); border: 1px solid rgba(255, 200, 80, .5);
       padding: 9px 20px; border-radius: 12px; opacity: 0; pointer-events: none;
-      transition: opacity .3s, transform .3s; max-width: 520px;
+      transition: opacity .3s, transform .3s; max-width: 560px;
     }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    #links { bottom: 12px; right: 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+    #links a {
+      font-size: 12px; color: #a8b89a; text-decoration: none;
+      background: rgba(10, 14, 8, .6); border: 1px solid rgba(150,190,120,.18);
+      padding: 6px 12px; border-radius: 10px;
+    }
+    #links a:hover { color: #e4efd8; }
 
     #over {
       position: fixed; inset: 0; z-index: 40; display: none;
@@ -95,16 +102,14 @@
       background: linear-gradient(180deg, #ffd76e, #ffab3d); border: 0;
       padding: 12px 34px; border-radius: 14px;
     }
-    #link3d {
-      bottom: 12px; right: 12px; font-size: 12px; color: #a8b89a; text-decoration: none;
-      background: rgba(10, 14, 8, .6); border: 1px solid rgba(150,190,120,.18);
-      padding: 6px 12px; border-radius: 10px;
-    }
-    #link3d:hover { color: #e4efd8; }
   </style>
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three/three.module.js" } }
+  </script>
 </head>
 <body>
   <canvas id="cv"></canvas>
+  <canvas id="ov"></canvas>
 
   <div class="hud" id="inv">
     <div class="row">❤️ <div id="hpwrap"><div id="hpfill"></div></div></div>
@@ -131,9 +136,12 @@
 
   <div class="hud" id="toast"></div>
   <div class="hud" id="help">
-    Он всё делает сам · <b>ЛКМ</b> — послать в точку · <b>1/2/3</b> — что улучшать · <b>Space</b> — пауза · <b>M</b> — звук
+    Он всё делает сам · <b>ЛКМ</b> — послать в точку · <b>1/2/3</b> — что улучшать · <b>колесо</b> — зум · <b>Space</b> — пауза · <b>M</b> — звук
   </div>
-  <a class="hud" id="link3d" href="./3d.html">🎮 3D-версия</a>
+  <div class="hud" id="links">
+    <a href="./classic2d.html">🕹 2D-классика</a>
+    <a href="./3d.html">🥊 3D-боксёр</a>
+  </div>
 
   <div id="over"><div id="overbox">
     <div id="overTitle">Игра окончена</div>
@@ -141,6 +149,6 @@
     <button id="overBtn">Начать заново</button>
   </div></div>
 
-  <script src="./game2d.js"></script>
+  <script type="module" src="./game3d.js"></script>
 </body>
 </html>
