@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D-персонаж · космическая платформа</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #04060f; }
+    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #dfe8ff; }
+    #app, #app canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+
+    /* ===== HUD ===== */
+    .hud { position: fixed; z-index: 10; pointer-events: none; user-select: none; }
+    #title {
+      top: 18px; left: 22px;
+      font-size: 15px; font-weight: 800; letter-spacing: 2.5px; text-transform: uppercase;
+      background: linear-gradient(90deg, #7df3ff, #b39dff);
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+      text-shadow: 0 0 22px rgba(90, 200, 255, .25);
+    }
+    #subtitle { top: 40px; left: 22px; font-size: 11px; color: #7787ad; letter-spacing: 1px; }
+    #score {
+      top: 18px; right: 22px; font-size: 14px; font-weight: 700; letter-spacing: 1px;
+      color: #8ef0ff; background: rgba(10, 20, 40, .55); border: 1px solid rgba(0, 220, 255, .25);
+      padding: 8px 14px; border-radius: 999px; backdrop-filter: blur(6px);
+    }
+    #help {
+      bottom: 16px; left: 50%; transform: translateX(-50%);
+      font-size: 12.5px; color: #93a2c8; white-space: nowrap;
+      background: rgba(8, 14, 30, .6); border: 1px solid rgba(120, 150, 255, .15);
+      padding: 8px 16px; border-radius: 12px; backdrop-filter: blur(6px);
+    }
+    #help b { color: #cfe0ff; font-weight: 700; }
+    #credit { bottom: 52px; left: 50%; transform: translateX(-50%); font-size: 10.5px; color: #4d5a7d; }
+    #toast {
+      bottom: 90px; left: 50%; transform: translateX(-50%) translateY(10px);
+      font-size: 15px; font-weight: 700; color: #eaffff;
+      background: rgba(0, 90, 120, .75); border: 1px solid rgba(0, 220, 255, .45);
+      padding: 10px 22px; border-radius: 14px; opacity: 0;
+      transition: opacity .3s, transform .3s; text-shadow: 0 0 12px rgba(0,220,255,.6);
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #combo {
+      bottom: 92px; left: 50%; transform: translateX(-50%);
+      font-size: 17px; font-weight: 800; letter-spacing: 1.5px; color: #ffd76e;
+      text-shadow: 0 0 14px rgba(255, 190, 60, .55), 0 2px 8px rgba(0,0,0,.7);
+      opacity: 0; transition: opacity .25s;
+    }
+    #combo.show { opacity: 1; }
+
+    /* ===== Загрузка ===== */
+    #overlay {
+      position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 20px;
+      background: radial-gradient(ellipse at center, #0a1226 0%, #04060f 70%);
+      transition: opacity .7s;
+    }
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+    #overlay .spin {
+      width: 52px; height: 52px; border-radius: 50%;
+      border: 3px solid rgba(0, 220, 255, .15); border-top-color: #29d8ff;
+      animation: rot 1s linear infinite;
+    }
+    @keyframes rot { to { transform: rotate(360deg); } }
+    #loadtext { font-size: 14px; color: #9fb4e0; letter-spacing: 1px; }
+    #bar { width: 240px; height: 4px; border-radius: 4px; background: rgba(120,160,255,.12); overflow: hidden; }
+    #bar div { width: 0%; height: 100%; background: linear-gradient(90deg, #29d8ff, #7d6bff); transition: width .2s; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div class="hud" id="title">3D-персонаж · космическая платформа</div>
+  <div class="hud" id="subtitle">скелетная анимация · WebGL · Three.js</div>
+  <div class="hud" id="score">Сферы: 0 / 7</div>
+  <div class="hud" id="toast"></div>
+  <div class="hud" id="credit">Модель: «Soldier» — анимированный персонаж из примеров three.js (MIT)</div>
+  <div class="hud" id="help">
+    <b>W A S D</b> / стрелки — движение &nbsp;·&nbsp; <b>Shift</b> — бег &nbsp;·&nbsp; <b>ЛКМ</b> — камера &nbsp;·&nbsp; <b>колесо</b> — зум
+  </div>
+
+  <div class="hud" id="overlay">
+    <div class="spin"></div>
+    <div id="loadtext">Загрузка модели персонажа…</div>
+    <div id="bar"><div></div></div>
+  </div>
+
+  <a class="hud" href="./index.html" style="pointer-events:auto; bottom:16px; right:22px; font-size:12.5px; color:#93a2c8; text-decoration:none; border:1px solid rgba(120,150,255,.25); padding:8px 14px; border-radius:12px; background:rgba(8,14,30,.6); backdrop-filter:blur(6px);">⛏ 2D-игра «Колонист»</a>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

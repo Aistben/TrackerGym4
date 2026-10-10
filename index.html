@@ -3,97 +3,103 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>3D-персонаж · космическая платформа</title>
+  <title>Колонист · 2D база и ресурсы</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #04060f; }
-    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #dfe8ff; }
-    #app, #app canvas { position: fixed; inset: 0; display: block; touch-action: none; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #10131c; }
+    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #e8eefc; }
+    #cv { position: fixed; inset: 0; display: block; }
 
-    /* ===== HUD ===== */
-    .hud { position: fixed; z-index: 10; pointer-events: none; user-select: none; }
-    #title {
-      top: 18px; left: 22px;
-      font-size: 15px; font-weight: 800; letter-spacing: 2.5px; text-transform: uppercase;
-      background: linear-gradient(90deg, #7df3ff, #b39dff);
-      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-      text-shadow: 0 0 22px rgba(90, 200, 255, .25);
+    .hud { position: fixed; z-index: 10; user-select: none; }
+
+    /* Инвентарь */
+    #inv {
+      top: 14px; left: 14px; display: flex; gap: 8px;
+      background: rgba(12, 16, 26, .72); border: 1px solid rgba(255,255,255,.12);
+      padding: 8px 12px; border-radius: 14px; backdrop-filter: blur(6px);
+      font-size: 14px; font-weight: 700;
     }
-    #subtitle { top: 40px; left: 22px; font-size: 11px; color: #7787ad; letter-spacing: 1px; }
-    #score {
-      top: 18px; right: 22px; font-size: 14px; font-weight: 700; letter-spacing: 1px;
-      color: #8ef0ff; background: rgba(10, 20, 40, .55); border: 1px solid rgba(0, 220, 255, .25);
-      padding: 8px 14px; border-radius: 999px; backdrop-filter: blur(6px);
+    #inv span { display: flex; align-items: center; gap: 6px; }
+    #inv .num { color: #ffd76e; min-width: 26px; }
+
+    /* День и кнопки */
+    #topright { top: 14px; right: 14px; display: flex; gap: 8px; align-items: center; }
+    #daybox {
+      background: rgba(12, 16, 26, .72); border: 1px solid rgba(255,255,255,.12);
+      padding: 8px 14px; border-radius: 14px; font-size: 14px; font-weight: 700;
+      backdrop-filter: blur(6px); display: flex; gap: 8px; align-items: center;
     }
+    .ibtn {
+      width: 36px; height: 36px; border-radius: 12px; cursor: pointer;
+      background: rgba(12, 16, 26, .72); border: 1px solid rgba(255,255,255,.14);
+      color: #cfd9f0; font-size: 16px; line-height: 1; display: flex; align-items: center; justify-content: center;
+    }
+    .ibtn:hover { background: rgba(40, 50, 80, .85); }
+
+    /* Хотбар */
+    #hotbar {
+      bottom: 52px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px;
+    }
+    .slot {
+      width: 62px; height: 66px; border-radius: 14px; cursor: pointer; position: relative;
+      background: rgba(12, 16, 26, .72); border: 2px solid rgba(255,255,255,.14);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      backdrop-filter: blur(6px);
+    }
+    .slot.sel { border-color: #ffd76e; box-shadow: 0 0 16px rgba(255, 200, 80, .35); }
+    .slot .ic { font-size: 22px; line-height: 1; }
+    .slot .nm { font-size: 9.5px; color: #aeb9d4; font-weight: 700; white-space: nowrap; }
+    .slot .cost { font-size: 9.5px; color: #8fd48f; font-weight: 700; }
+    .slot.poor .cost { color: #e57373; }
+    .slot .key { position: absolute; top: 3px; left: 6px; font-size: 10px; color: #6f7a94; font-weight: 800; }
+
     #help {
-      bottom: 16px; left: 50%; transform: translateX(-50%);
-      font-size: 12.5px; color: #93a2c8; white-space: nowrap;
-      background: rgba(8, 14, 30, .6); border: 1px solid rgba(120, 150, 255, .15);
-      padding: 8px 16px; border-radius: 12px; backdrop-filter: blur(6px);
+      bottom: 12px; left: 50%; transform: translateX(-50%);
+      font-size: 12px; color: #93a2c8; white-space: nowrap;
+      background: rgba(8, 12, 22, .6); border: 1px solid rgba(120,150,255,.14);
+      padding: 6px 14px; border-radius: 10px; backdrop-filter: blur(6px);
     }
-    #help b { color: #cfe0ff; font-weight: 700; }
-    #credit { bottom: 52px; left: 50%; transform: translateX(-50%); font-size: 10.5px; color: #4d5a7d; }
+    #help b { color: #cfe0ff; }
+
     #toast {
-      bottom: 90px; left: 50%; transform: translateX(-50%) translateY(10px);
-      font-size: 15px; font-weight: 700; color: #eaffff;
-      background: rgba(0, 90, 120, .75); border: 1px solid rgba(0, 220, 255, .45);
-      padding: 10px 22px; border-radius: 14px; opacity: 0;
-      transition: opacity .3s, transform .3s; text-shadow: 0 0 12px rgba(0,220,255,.6);
+      top: 66px; left: 50%; transform: translateX(-50%) translateY(-8px);
+      font-size: 15px; font-weight: 700; color: #fffbe8;
+      background: rgba(60, 40, 10, .8); border: 1px solid rgba(255, 200, 80, .5);
+      padding: 9px 20px; border-radius: 12px; opacity: 0; pointer-events: none;
+      transition: opacity .3s, transform .3s;
     }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-    #combo {
-      bottom: 92px; left: 50%; transform: translateX(-50%);
-      font-size: 17px; font-weight: 800; letter-spacing: 1.5px; color: #ffd76e;
-      text-shadow: 0 0 14px rgba(255, 190, 60, .55), 0 2px 8px rgba(0,0,0,.7);
-      opacity: 0; transition: opacity .25s;
-    }
-    #combo.show { opacity: 1; }
 
-    /* ===== Загрузка ===== */
-    #overlay {
-      position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 20px;
-      background: radial-gradient(ellipse at center, #0a1226 0%, #04060f 70%);
-      transition: opacity .7s;
+    #link3d {
+      bottom: 12px; right: 12px; font-size: 12px; color: #93a2c8; text-decoration: none;
+      background: rgba(8, 12, 22, .6); border: 1px solid rgba(120,150,255,.18);
+      padding: 6px 12px; border-radius: 10px;
     }
-    #overlay.hidden { opacity: 0; pointer-events: none; }
-    #overlay .spin {
-      width: 52px; height: 52px; border-radius: 50%;
-      border: 3px solid rgba(0, 220, 255, .15); border-top-color: #29d8ff;
-      animation: rot 1s linear infinite;
-    }
-    @keyframes rot { to { transform: rotate(360deg); } }
-    #loadtext { font-size: 14px; color: #9fb4e0; letter-spacing: 1px; }
-    #bar { width: 240px; height: 4px; border-radius: 4px; background: rgba(120,160,255,.12); overflow: hidden; }
-    #bar div { width: 0%; height: 100%; background: linear-gradient(90deg, #29d8ff, #7d6bff); transition: width .2s; }
+    #link3d:hover { color: #cfe0ff; }
   </style>
-  <script type="importmap">
-    {
-      "imports": {
-        "three": "./vendor/three/three.module.js",
-        "three/addons/": "./vendor/three/addons/"
-      }
-    }
-  </script>
 </head>
 <body>
-  <div id="app"></div>
+  <canvas id="cv"></canvas>
 
-  <div class="hud" id="title">3D-персонаж · космическая платформа</div>
-  <div class="hud" id="subtitle">скелетная анимация · WebGL · Three.js</div>
-  <div class="hud" id="score">Сферы: 0 / 7</div>
+  <div class="hud" id="inv">
+    <span>🪵 <span class="num" id="inv-wood">0</span></span>
+    <span>🪨 <span class="num" id="inv-stone">0</span></span>
+  </div>
+
+  <div class="hud" id="topright">
+    <div id="daybox"><span id="clockIcon">☀️</span><span id="dayLabel">День 1</span></div>
+    <button class="ibtn" id="btnMute" title="Звук (M)">🔊</button>
+    <button class="ibtn" id="btnReset" title="Начать заново">🔄</button>
+  </div>
+
   <div class="hud" id="toast"></div>
-  <div class="hud" id="credit">Модель: «Soldier» — анимированный персонаж из примеров three.js (MIT)</div>
+  <div class="hud" id="hotbar"></div>
   <div class="hud" id="help">
-    <b>W A S D</b> / стрелки — движение &nbsp;·&nbsp; <b>Shift</b> — бег &nbsp;·&nbsp; <b>ЛКМ</b> — камера &nbsp;·&nbsp; <b>колесо</b> — зум
+    <b>A/D</b> — идти · <b>W/Пробел</b> — прыжок · <b>ЛКМ</b> — рубить/копать/строить · <b>1–5</b>/колесо — слот · <b>ПКМ</b> — отмена · <b>M</b> — звук
   </div>
+  <a class="hud" id="link3d" href="./3d.html">🎮 3D-версия</a>
 
-  <div id="overlay">
-    <div class="spin"></div>
-    <div id="loadtext">Загрузка модели персонажа…</div>
-    <div id="bar"><div></div></div>
-  </div>
-
-  <script type="module" src="./main.js"></script>
+  <script src="./game2d.js"></script>
 </body>
 </html>
