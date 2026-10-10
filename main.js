@@ -7,6 +7,7 @@ const WALK_SPEED = 2.1;       // скорость шага, м/с
 const RUN_SPEED = 5.4;        // скорость бега, м/с
 const MODEL_YAW = Math.PI;    // модель в файле смотрит в -Z → разворачиваем на +Z
 const TOTAL_ORBS = 7;
+const BAG_HIT_DIST = 2.05;    // дистанция достижения удара
 
 /* ============================ РЕНДЕРЕР / СЦЕНА ============================ */
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -94,7 +95,6 @@ platform.position.y = -0.6;
 platform.receiveShadow = true;
 scene.add(platform);
 
-// «Киль» платформы — она парит в космосе
 const under = new THREE.Mesh(
   new THREE.ConeGeometry(PLATFORM_RADIUS + 0.75, 7, 32, 1, true),
   new THREE.MeshStandardMaterial({ color: 0x0a0d16, roughness: 0.9, metalness: 0.3, side: THREE.DoubleSide })
@@ -103,7 +103,6 @@ under.rotation.x = Math.PI;
 under.position.y = -4.7;
 scene.add(under);
 
-// Светящиеся кольца
 function glowRing(radius, opacity, y) {
   const m = new THREE.Mesh(
     new THREE.TorusGeometry(radius, 0.06, 8, 160),
@@ -124,7 +123,6 @@ grid.material.transparent = true;
 grid.material.opacity = 0.5;
 scene.add(grid);
 
-// Кристаллы по краю платформы
 const crystalMat = new THREE.MeshStandardMaterial({
   color: 0x0d2f38, emissive: 0x00b8d9, emissiveIntensity: 0.55,
   roughness: 0.25, metalness: 0.1, flatShading: true
@@ -142,7 +140,7 @@ for (let i = 0; i < 9; i++) {
   scene.add(c);
 }
 
-/* ============================ АСТЕРОИДЫ ВОКРУГ ============================ */
+/* ============================ АСТЕРОИДЫ ============================ */
 const asteroids = [];
 {
   const geo = new THREE.IcosahedronGeometry(1, 0);
@@ -174,14 +172,105 @@ for (let i = 0; i < TOTAL_ORBS; i++) {
   orbs.push(orb);
 }
 
+/* ============================ БОКСЁРСКАЯ ГРУША (центр платформы) ============================ */
+const steel = new THREE.MeshStandardMaterial({ color: 0x2a2f3d, roughness: 0.35, metalness: 0.85 });
+const steelDark = new THREE.MeshStandardMaterial({ color: 0x1a1e28, roughness: 0.5, metalness: 0.7 });
+
+// Стойка
+const base = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.95, 0.1, 32), steelDark);
+base.position.y = 0.05;
+base.castShadow = base.receiveShadow = true;
+scene.add(base);
+
+const column = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.095, 0.52, 16), steel);
+column.position.y = 0.36;
+column.castShadow = true;
+scene.add(column);
+
+const joint = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), steel);
+joint.position.y = 0.62;
+joint.castShadow = true;
+scene.add(joint);
+
+// Маятник: группа-точка вращения на шарнире
+const bagPivot = new THREE.Group();
+bagPivot.position.y = 0.62;
+scene.add(bagPivot);
+
+const leather = new THREE.MeshStandardMaterial({ color: 0x8a1f1f, roughness: 0.55, metalness: 0.05 });
+const bagBody = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.32, 1.22, 24), leather);
+bagBody.position.y = 0.65;
+bagBody.castShadow = true;
+bagPivot.add(bagBody);
+
+const bandMat = new THREE.MeshStandardMaterial({ color: 0x23262f, roughness: 0.6, metalness: 0.3 });
+for (const y of [0.1, 1.18]) {
+  const band = new THREE.Mesh(new THREE.TorusGeometry(0.335, 0.032, 10, 32), bandMat);
+  band.rotation.x = Math.PI / 2;
+  band.position.y = y;
+  band.castShadow = true;
+  bagPivot.add(band);
+}
+const bagCap = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.34, 0.07, 24), bandMat);
+bagCap.position.y = 1.29;
+bagCap.castShadow = true;
+bagPivot.add(bagCap);
+
+// Физика маятника (углы наклона + скорости)
+const bag = { ax: 0, az: 0, vx: 0, vz: 0, pulse: 0 };
+const BAG_K = 11, BAG_C = 1.25, BAG_MAX = 0.62;
+
+/* ============================ БОЕВАЯ СИСТЕМА: ПОЗЫ УДАРОВ ============================
+   Позы подобраны и проверены численно на скелете модели.
+   Оси в локальных системах костей Mixamo: для правой руки +X вперёд, для левой -X.
+   Формат: [наклон X, поворот Y, крен Z] в радианах. */
+const BONE = {
+  RA: "mixamorig:RightArm",  RF: "mixamorig:RightForeArm",
+  LA: "mixamorig:LeftArm",   LF: "mixamorig:LeftForeArm",
+  S1: "mixamorig:Spine1",    S2: "mixamorig:Spine2",
+};
+
+const PUNCHES = [
+  {
+    name: "Джаб", D: 0.38, lunge: 1.8, power: 2.4,
+    windup: { [BONE.RA]: [0.35, 0, 0.3],  [BONE.RF]: [0.7, 0, 0],   [BONE.LA]: [-0.5, 0, 0.55],  [BONE.LF]: [-1.9, 0, 0], [BONE.S1]: [0, 0.12, 0],   [BONE.S2]: [0, 0.12, 0] },
+    strike: { [BONE.RA]: [1.95, 0.5, -0.2], [BONE.RF]: [-0.2, 0, 0], [BONE.LA]: [-0.5, 0, 0.55], [BONE.LF]: [-1.9, 0, 0], [BONE.S1]: [0, 0.35, 0],   [BONE.S2]: [0, 0.35, 0] },
+  },
+  {
+    name: "Кросс", D: 0.42, lunge: 2.1, power: 2.8,
+    windup: { [BONE.LA]: [-0.3, 0, 0.3],  [BONE.LF]: [-0.8, 0, 0],  [BONE.RA]: [0.5, 0, 0.55],   [BONE.RF]: [1.9, 0, 0],  [BONE.S1]: [0, -0.15, 0],  [BONE.S2]: [0, -0.15, 0] },
+    strike: { [BONE.LA]: [-1.6, -0.2, -0.7], [BONE.LF]: [0.2, 0, 0], [BONE.RA]: [0.5, 0, 0.55], [BONE.RF]: [1.9, 0, 0],  [BONE.S1]: [0, -0.42, 0],  [BONE.S2]: [0, -0.42, 0] },
+  },
+  {
+    name: "Хук", D: 0.46, lunge: 1.9, power: 3.2,
+    windup: { [BONE.RA]: [0.9, 0.4, -0.5], [BONE.RF]: [-0.4, 0, 0], [BONE.LA]: [-0.5, 0, 0.55], [BONE.LF]: [-1.9, 0, 0], [BONE.S1]: [0, 0.2, 0],    [BONE.S2]: [0, 0.2, 0] },
+    strike: { [BONE.RA]: [1.6, 0.6, 0.7],  [BONE.RF]: [-0.35, 0, 0], [BONE.LA]: [-0.45, 0, 0.5], [BONE.LF]: [-1.8, 0, 0], [BONE.S1]: [0.08, 0.55, 0], [BONE.S2]: [0.08, 0.55, 0] },
+  },
+  {
+    name: "Апперкот", D: 0.52, lunge: 1.7, power: 3.6,
+    windup: { [BONE.LA]: [-0.35, 0, 0.35], [BONE.LF]: [-0.5, 0, 0], [BONE.RA]: [0.35, 0, 0.5],  [BONE.RF]: [1.6, 0, 0],  [BONE.S1]: [0.15, -0.1, 0], [BONE.S2]: [0.15, -0.1, 0] },
+    strike: { [BONE.LA]: [-1.25, -0.6, 0.53], [BONE.LF]: [-1.2, 0, 0], [BONE.RA]: [0.5, 0, 0.55], [BONE.RF]: [1.9, 0, 0], [BONE.S1]: [-0.12, -0.15, 0], [BONE.S2]: [-0.12, -0.15, 0] },
+  },
+];
+
+function lerpPose(a, b, k) {
+  const out = {};
+  for (const n of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    const ea = a[n] || [0, 0, 0], eb = b[n] || [0, 0, 0];
+    out[n] = [ea[0] + (eb[0] - ea[0]) * k, ea[1] + (eb[1] - ea[1]) * k, ea[2] + (eb[2] - ea[2]) * k];
+  }
+  return out;
+}
+
 /* ============================ ПЕРСОНАЖ ============================ */
-const pivot = new THREE.Group();   // точка, которой мы управляем
+const pivot = new THREE.Group();
 scene.add(pivot);
 
 let mixer = null;
 const actions = {};
 let activeAction = null;
 let modelReady = false;
+const punchBones = {};   // ключ кости -> THREE.Bone
 
 const loader = new GLTFLoader();
 loader.load(
@@ -197,6 +286,11 @@ loader.load(
     model.rotation.y = MODEL_YAW;
     pivot.add(model);
 
+    for (const [k, name] of Object.entries(BONE)) {
+      const b = model.getObjectByName(name);
+      if (b) punchBones[k] = b;
+    }
+
     mixer = new THREE.AnimationMixer(model);
     const pick = (n) => THREE.AnimationClip.findByName(gltf.animations, n);
     actions.idle = mixer.clipAction(pick("Idle"));
@@ -207,6 +301,7 @@ loader.load(
     modelReady = true;
 
     document.getElementById("overlay").classList.add("hidden");
+    toast("🥊 Бей грушу в центре! ЛКМ — серия ударов");
   },
   (e) => {
     if (e.total > 0) {
@@ -234,37 +329,51 @@ function setAction(next, fade = 0.25) {
 const keys = {};
 window.addEventListener("keydown", (e) => {
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+  if (e.code === "Space" && !e.repeat) requestPunch();
   keys[e.code] = true;
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
 window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
 
-// Орбитальная камера (мышь)
-const cam = { yaw: Math.PI, pitch: 0.32, dist: 6.5 };
+// Камера: перетаскивание ЛКМ/ПКМ; короткий клик ЛКМ = удар
+const cam = { yaw: 0, pitch: 0.30, dist: 6.5 };
 let dragging = false, px = 0, py = 0;
+let downInfo = null;
 const el = renderer.domElement;
 el.addEventListener("pointerdown", (e) => {
   dragging = true; px = e.clientX; py = e.clientY;
+  downInfo = { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0 };
   el.setPointerCapture(e.pointerId);
 });
 el.addEventListener("pointermove", (e) => {
   if (!dragging) return;
-  cam.yaw -= (e.clientX - px) * 0.005;
-  cam.pitch = THREE.MathUtils.clamp(cam.pitch + (e.clientY - py) * 0.005, 0.05, 1.15);
+  const dx = e.clientX - px, dy = e.clientY - py;
+  if (downInfo) downInfo.moved += Math.abs(dx) + Math.abs(dy);
+  cam.yaw -= dx * 0.005;
+  cam.pitch = THREE.MathUtils.clamp(cam.pitch + dy * 0.005, 0.05, 1.15);
   px = e.clientX; py = e.clientY;
 });
-el.addEventListener("pointerup", () => { dragging = false; });
+el.addEventListener("pointerup", (e) => {
+  dragging = false;
+  if (e.button === 0 && downInfo && downInfo.moved < 7 && performance.now() - downInfo.t < 400) {
+    requestPunch();
+  }
+  downInfo = null;
+});
+el.addEventListener("contextmenu", (e) => e.preventDefault());
 el.addEventListener("wheel", (e) => {
   e.preventDefault();
   cam.dist = THREE.MathUtils.clamp(cam.dist + e.deltaY * 0.004, 3, 14);
 }, { passive: false });
 
 /* ============================ СОСТОЯНИЕ ИГРОКА ============================ */
-const pos = new THREE.Vector3(0, 0, 0);
+const pos = new THREE.Vector3(0, 0, 4.6);   // спавн перед грушей
 const vel = new THREE.Vector3();
-let yaw = 0;
+let yaw = Math.PI;                          // лицом к груше (в -Z)
 const UP = new THREE.Vector3(0, 1, 0);
-const smoothTarget = new THREE.Vector3(0, 1.5, 0);
+const smoothTarget = new THREE.Vector3(0, 1.5, 4.6);
+let shake = 0;
+let gameTime = 0;
 
 function dampAngle(current, target, lambda, dt) {
   let diff = (target - current) % (Math.PI * 2);
@@ -273,23 +382,125 @@ function dampAngle(current, target, lambda, dt) {
   return current + diff * (1 - Math.exp(-lambda * dt));
 }
 
+/* ============================ СОСТОЯНИЕ КОМБО ============================ */
+const ps = { active: null, p: 0, nextIdx: 0, lastStart: -10, chain: [], impacted: false };
+let hits = 0;
+
+function requestPunch() {
+  if (!modelReady) return;
+  if (ps.active && ps.p < 0.5) return;                    // прошлый удар ещё не отработал
+  if (gameTime - ps.lastStart > 1.1) { ps.nextIdx = 0; ps.chain = []; }  // комбо остыло
+  const punch = PUNCHES[ps.nextIdx];
+  ps.nextIdx = (ps.nextIdx + 1) % PUNCHES.length;
+  ps.active = punch;
+  ps.p = 0;
+  ps.impacted = false;
+  ps.lastStart = gameTime;
+  ps.chain.push(punch.name);
+  if (ps.chain.length > 4) ps.chain.shift();
+  if (ps.chain.length === 4) toast("💥 КОМБО x4!");
+  showCombo();
+  // рывок вперёд
+  vel.x += Math.sin(yaw) * punch.lunge;
+  vel.z += Math.cos(yaw) * punch.lunge;
+}
+
+function tryHit(punch) {
+  const dx = -pos.x, dz = -pos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist > BAG_HIT_DIST || dist < 1e-4) return;
+  const nx = dx / dist, nz = dz / dist;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  if (fx * nx + fz * nz < 0.5) return;                    // бьём не в сторону груши
+  // импульс маятнику: rotation.x наклоняет верх к +Z, rotation.z — к -X
+  bag.vx += nz * punch.power;
+  bag.vz += -nx * punch.power;
+  bag.pulse = 1;
+  hits++;
+  updateScore();
+  shake = 0.045 + punch.power * 0.008;
+  spawnRing(-nx * 0.38, 1.32, -nz * 0.38);
+}
+
+const _euler = new THREE.Euler();
+function applyPunch(dt) {
+  if (!modelReady || !ps.active) return;
+  ps.p += dt / ps.active.D;
+  const p = Math.min(ps.p, 1);
+  const w = Math.min(
+    THREE.MathUtils.smoothstep(p, 0, 0.15),
+    1 - THREE.MathUtils.smoothstep(p, 0.5, 1)
+  );
+  const k = THREE.MathUtils.smoothstep(p, 0.28, 0.45);
+  const pose = lerpPose(ps.active.windup, ps.active.strike, k);
+  for (const name in pose) {
+    const bone = punchBones[name];
+    if (!bone) continue;
+    const e = pose[name];
+    _euler.set(e[0], e[1], e[2]);
+    const q = bone.quaternion.clone().multiply(new THREE.Quaternion().setFromEuler(_euler));
+    bone.quaternion.slerp(q, w);
+  }
+  if (!ps.impacted && p >= 0.45) {
+    ps.impacted = true;
+    tryHit(ps.active);
+  }
+  if (ps.p >= 1) ps.active = null;
+}
+
+/* ============================ ЭФФЕКТЫ УДАРА ============================ */
+const rings = [];
+const ringGeo = new THREE.RingGeometry(0.55, 0.72, 32);
+function spawnRing(x, y, z) {
+  const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    color: 0xbff8ff, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false
+  }));
+  m.position.set(x, y, z);
+  scene.add(m);
+  rings.push({ mesh: m, life: 0 });
+}
+function updateRings(dt) {
+  for (let i = rings.length - 1; i >= 0; i--) {
+    const r = rings[i];
+    r.life += dt;
+    r.mesh.scale.setScalar(0.25 + r.life * 6);
+    r.mesh.material.opacity = 0.9 * (1 - r.life / 0.28);
+    r.mesh.lookAt(camera.position);
+    if (r.life > 0.28) {
+      scene.remove(r.mesh);
+      r.mesh.material.dispose();
+      rings.splice(i, 1);
+    }
+  }
+}
+
 /* ============================ HUD ============================ */
 let score = 0;
 const scoreEl = document.getElementById("score");
 const toastEl = document.getElementById("toast");
-let toastTimer = null;
+const comboEl = document.getElementById("combo");
+let toastTimer = null, comboTimer = null;
 function toast(msg) {
   toastEl.textContent = msg;
   toastEl.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2600);
 }
+function showCombo() {
+  comboEl.textContent = ps.chain.join(" → ") + (ps.chain.length >= 4 ? " 💥" : "");
+  comboEl.classList.add("show");
+  clearTimeout(comboTimer);
+  comboTimer = setTimeout(() => comboEl.classList.remove("show"), 1300);
+}
+function updateScore() {
+  scoreEl.textContent = `Сферы: ${score} / ${TOTAL_ORBS} · Удары: ${hits}`;
+}
+updateScore();
 
 /* ============================ ИГРОВОЙ ЦИКЛ ============================ */
 const clock = new THREE.Clock();
 
 function updatePlayer(dt) {
-  // Ввод относительно камеры
   const input = new THREE.Vector3(
     (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0), 0,
     (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0)
@@ -298,6 +509,7 @@ function updatePlayer(dt) {
   if (input.lengthSq() > 0) {
     input.normalize().applyAxisAngle(UP, cam.yaw);
     targetSpeed = (keys.ShiftLeft || keys.ShiftRight) ? RUN_SPEED : WALK_SPEED;
+    if (ps.active) targetSpeed *= 0.4;   // во время удара двигаемся медленнее
   }
   input.multiplyScalar(targetSpeed);
 
@@ -306,7 +518,7 @@ function updatePlayer(dt) {
   vel.z += (input.z - vel.z) * k;
   pos.addScaledVector(vel, dt);
 
-  // Не сходить с платформы (скольжение вдоль края)
+  // Границы платформы (скольжение вдоль края)
   const r = Math.hypot(pos.x, pos.z);
   const maxR = PLATFORM_RADIUS - 1.0;
   if (r > maxR) {
@@ -317,19 +529,34 @@ function updatePlayer(dt) {
     if (d > 0) { vel.x -= nx * d; vel.z -= nz * d; }
   }
 
+  // Столкновение с грушей + лёгкое расталкивание при подходе
+  const bdx = pos.x, bdz = pos.z;
+  const bd = Math.hypot(bdx, bdz);
+  const speed2 = Math.hypot(vel.x, vel.z);
+  if (bd < 1.15 && bd > 1e-4 && speed2 > 0.4) {
+    bag.vx += (vel.z / speed2) * dt * 1.4;
+    bag.vz += (-vel.x / speed2) * dt * 1.4;
+  }
+  if (bd < 0.88 && bd > 1e-4) {
+    pos.x *= 0.88 / bd;
+    pos.z *= 0.88 / bd;
+    const nx = bdx / bd, nz = bdz / bd;
+    const d = vel.x * nx + vel.z * nz;
+    if (d < 0) { vel.x -= nx * d; vel.z -= nz * d; }
+  }
+
   // Плавный поворот в сторону движения
-  const speed = Math.hypot(vel.x, vel.z);
-  if (speed > 0.25) yaw = dampAngle(yaw, Math.atan2(vel.x, vel.z), 12, dt);
+  if (speed2 > 0.25 && !ps.active) yaw = dampAngle(yaw, Math.atan2(vel.x, vel.z), 12, dt);
   pivot.position.set(pos.x, 0, pos.z);
   pivot.rotation.y = yaw;
 
-  // Анимации: idle / walk / run с плавным переходом
+  // Анимации ходьбы/бега
   if (modelReady) {
-    if (speed < 0.25) setAction(actions.idle);
-    else if (speed < 3.2) setAction(actions.walk);
+    if (speed2 < 0.25) setAction(actions.idle);
+    else if (speed2 < 3.2) setAction(actions.walk);
     else setAction(actions.run);
-    if (activeAction === actions.walk) actions.walk.timeScale = THREE.MathUtils.clamp(speed / 1.7, 0.7, 1.6);
-    if (activeAction === actions.run) actions.run.timeScale = THREE.MathUtils.clamp(speed / 4.6, 0.8, 1.5);
+    if (activeAction === actions.walk) actions.walk.timeScale = THREE.MathUtils.clamp(speed2 / 1.7, 0.7, 1.6);
+    if (activeAction === actions.run) actions.run.timeScale = THREE.MathUtils.clamp(speed2 / 4.6, 0.8, 1.5);
   }
 
   // Сбор сфер
@@ -340,10 +567,23 @@ function updatePlayer(dt) {
     if (dx * dx + dz * dz < 0.95) {
       orb.userData.picked = true;
       score++;
-      scoreEl.textContent = `Сферы: ${score} / ${TOTAL_ORBS}`;
+      updateScore();
       if (score === TOTAL_ORBS) toast("🎉 Все сферы собраны!");
     }
   }
+}
+
+function updateBag(dt, t) {
+  const ax2 = -BAG_K * bag.ax - BAG_C * bag.vx;
+  const az2 = -BAG_K * bag.az - BAG_C * bag.vz;
+  bag.vx += ax2 * dt; bag.vz += az2 * dt;
+  bag.ax += bag.vx * dt; bag.az += bag.vz * dt;
+  if (Math.abs(bag.ax) > BAG_MAX) { bag.ax = Math.sign(bag.ax) * BAG_MAX; bag.vx *= -0.25; }
+  if (Math.abs(bag.az) > BAG_MAX) { bag.az = Math.sign(bag.az) * BAG_MAX; bag.vz *= -0.25; }
+  bagPivot.rotation.x = bag.ax + Math.sin(t * 1.6) * 0.006;
+  bagPivot.rotation.z = bag.az + Math.cos(t * 1.3) * 0.006;
+  bag.pulse *= Math.exp(-6 * dt);
+  bagBody.scale.set(1 + 0.05 * bag.pulse, 1 - 0.07 * bag.pulse, 1 + 0.05 * bag.pulse);
 }
 
 function updateWorld(t, dt) {
@@ -351,11 +591,12 @@ function updateWorld(t, dt) {
     a.rotation.y += a.userData.spin * dt;
     a.position.y = a.userData.baseY + Math.sin(t * 0.4 + a.userData.bobS) * a.userData.bobA * 0.5;
   }
-  for (const orb of orbs) {
+  for (let i = orbs.length - 1; i >= 0; i--) {
+    const orb = orbs[i];
     if (orb.userData.picked) {
       orb.scale.multiplyScalar(1 - 5 * dt);
       orb.position.y += 1.8 * dt;
-      if (orb.scale.x < 0.04) { scene.remove(orb); orbs.splice(orbs.indexOf(orb), 1); }
+      if (orb.scale.x < 0.04) { scene.remove(orb); orbs.splice(i, 1); }
       continue;
     }
     orb.position.y = 0.9 + Math.sin(t * 2 + orb.userData.phase) * 0.15;
@@ -364,6 +605,8 @@ function updateWorld(t, dt) {
   planet.rotation.y += dt * 0.02;
   planetRing.rotation.z += dt * 0.01;
   ringEdge.material.opacity = 0.75 + Math.sin(t * 2.2) * 0.2;
+  updateBag(dt, t);
+  updateRings(dt);
 }
 
 function updateCamera(dt) {
@@ -376,16 +619,24 @@ function updateCamera(dt) {
   ).multiplyScalar(cam.dist);
   camera.position.copy(smoothTarget).add(off);
   camera.lookAt(smoothTarget);
+  if (shake > 0.0008) {
+    camera.position.x += (Math.random() - 0.5) * shake;
+    camera.position.y += (Math.random() - 0.5) * shake;
+    camera.position.z += (Math.random() - 0.5) * shake;
+    shake *= Math.exp(-7 * dt);
+  }
 }
 
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
   const t = clock.elapsedTime;
+  gameTime += dt;
   updatePlayer(dt);
+  if (mixer) mixer.update(dt);   // сначала скелетная анимация…
+  applyPunch(dt);                // …зПоверх неё — процедурный удар
   updateWorld(t, dt);
   updateCamera(dt);
-  if (mixer) mixer.update(dt);
   renderer.render(scene, camera);
 }
 animate();

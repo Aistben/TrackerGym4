@@ -41,6 +41,13 @@
       transition: opacity .3s, transform .3s; text-shadow: 0 0 12px rgba(0,220,255,.6);
     }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #combo {
+      bottom: 92px; left: 50%; transform: translateX(-50%);
+      font-size: 17px; font-weight: 800; letter-spacing: 1.5px; color: #ffd76e;
+      text-shadow: 0 0 14px rgba(255, 190, 60, .55), 0 2px 8px rgba(0,0,0,.7);
+      opacity: 0; transition: opacity .25s;
+    }
+    #combo.show { opacity: 1; }
 
     /* ===== Загрузка ===== */
     #overlay {
